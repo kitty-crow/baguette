@@ -1,0 +1,27 @@
+{
+  "name": "@kitty-crow/baguette",
+  "version": "0.2.6",
+  "private": true,
+  "type": "module",
+  "description": "Kernel-independent ahead-of-time TypeScript-to-WebAssembly compiler.",
+  "bin": {
+    "baguette": "./src/compiler.ts"
+  },
+  "scripts": {
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "assemblyscript": "0.28.19",
+    "binaryen": "130.0.0-nightly.20260609",
+    "typescript": "^5.9.2"
+  },
+  "engines": {
+    "bun": ">=1.1.0",
+    "node": ">=22.6.0"
+  },
+  "author": {
+    "name": "Kitty Crow",
+    "url": "https://kittycrow.dev"
+  },
+  "license": "MIT"
+}
