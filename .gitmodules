@@ -1,0 +1,3 @@
+[submodule "vendor/kittyx"]
+	path = vendor/kittyx
+	url = ../kittyx.git

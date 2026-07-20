@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "dependencies": [
+    {
+      "name": "KITTYX",
+      "repository": "kitty-crow/kittyx",
+      "path": "vendor/kittyx",
+      "commit": "80dee2d611adb42b7b07608cc308d51d5112e84c",
+      "relationship": "contract",
+      "direct": true,
+      "updatePolicy": "pull-request"
+    }
+  ]
+}

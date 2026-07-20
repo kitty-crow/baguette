@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "dependants": [
+    {
+      "repository": "kitty-crow/teto",
+      "dependency": "Baguette",
+      "impact": [
+        "wasm-compiler",
+        "generated-kernel"
+      ]
+    },
+    {
+      "repository": "kitty-crow/mikuOS",
+      "dependency": "Baguette",
+      "impact": [
+        "wasm-compiler"
+      ],
+      "advisory": true
+    }
+  ]
+}
