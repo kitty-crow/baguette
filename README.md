@@ -1,5 +1,7 @@
 # Baguette
 
+**BAGUETTE** means **Baguette Ahead-of-time Generates Universal Executables, Targeting Teto Efficiently**.
+
 Baguette is an ahead-of-time compiler from a restricted TypeScript
 programme to WebAssembly.
 
