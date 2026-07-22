@@ -17,5 +17,5 @@ Important fields include:
 - `allowedHostImports`: the imports permitted in the final module;
 - `asyncLowering`: the asynchronous lowering strategy.
 
-The example configuration documents the complete shape accepted by
-the current release.
+`baguette.config.example.json` shows the complete configuration
+accepted by the current release.
