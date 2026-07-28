@@ -1,0 +1,51 @@
+name: Teto integration diagnostic
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    if: github.head_ref == 'agent/canonical-bake'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/canonical-bake
+          fetch-depth: 0
+          submodules: recursive
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Capture Teto failure
+        run: |
+          set -Eeuo pipefail
+          git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/kitty-crow/teto.git ../teto-diagnostic
+          rm -rf ../teto-diagnostic/baguette
+          mkdir -p ../teto-diagnostic/baguette
+          rsync -a --exclude .git --exclude node_modules ./ ../teto-diagnostic/baguette/
+          cd ../teto-diagnostic
+          npm install >/tmp/teto-install.log 2>&1
+          set +e
+          npm run teto:build >/tmp/teto-build.log 2>&1
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            cd "$GITHUB_WORKSPACE"
+            tail -n 200 /tmp/teto-build.log > teto-failure.txt
+            rm .github/workflows/agent-teto-diagnostic.yml
+            git config user.name "Kitty Crow"
+            git config user.email "141717449+kitty-crow@users.noreply.github.com"
+            git add -A
+            git add -f teto-failure.txt
+            git commit -m "Capture Teto compatibility diagnostic"
+            git push origin HEAD:agent/canonical-bake
+            exit 1
+          fi
