@@ -23,12 +23,27 @@ jobs:
           node-version: 22
 
       - name: Install
-        run: |
-          if [ -f package-lock.json ]; then
-            npm ci
-          else
-            npm install
-          fi
+        run: npm install --package-lock=false
 
-      - name: Check
+      - name: Check Baguette and Bake
         run: npm run check
+
+      - name: Verify Teto compatibility
+        run: |
+          git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/kitty-crow/teto.git ../teto-check
+          rm -rf ../teto-check/baguette
+          mkdir -p ../teto-check/baguette
+          rsync -a --exclude .git --exclude node_modules ./ ../teto-check/baguette/
+          cd ../teto-check
+          npm install
+          npm run teto:build
+
+      - name: Verify Sandsara compatibility
+        run: |
+          git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/kitty-crow/sandsara-track-viewer.git ../sandsara-check
+          rm -rf ../sandsara-check/baguette
+          mkdir -p ../sandsara-check/baguette
+          rsync -a --exclude .git --exclude node_modules ./ ../sandsara-check/baguette/
+          cd ../sandsara-check
+          npm install
+          npm run build:router-wasm
