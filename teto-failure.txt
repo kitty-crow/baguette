@@ -1,0 +1,15 @@
+
+> @kittyx/teto@0.1.0 teto:build
+> bun baguette/src/compiler.ts
+
+184 | if (!await exists(bakeProject)) {
+185 |   throw new Error("Baguette's Bake submodule is missing; run git submodule update --init --recursive");
+186 | }
+187 | if (!await exists(bakeCli)) {
+188 |   const resolver = (import.meta as unknown as { resolve(specifier: string): string }).resolve;
+189 |   const typescriptFile = urlHost.fileURLToPath(resolver("typescript"));
+                                                     ^
+TypeError: import.meta.resolve must be bound to an import.meta object
+      at /home/runner/work/baguette/teto-diagnostic/baguette/src/bake-stage.ts:189:48
+
+Bun v1.3.14 (Linux x64)
