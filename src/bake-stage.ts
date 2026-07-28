@@ -185,8 +185,8 @@ if (!await exists(bakeProject)) {
   throw new Error("Baguette's Bake submodule is missing; run git submodule update --init --recursive");
 }
 if (!await exists(bakeCli)) {
-  const resolver = (import.meta as unknown as { resolve(specifier: string): string }).resolve;
-  const typescriptFile = urlHost.fileURLToPath(resolver("typescript"));
+  const importMeta = import.meta as unknown as { resolve(specifier: string): string };
+  const typescriptFile = urlHost.fileURLToPath(importMeta.resolve("typescript"));
   const tscFile = pathHost.join(pathHost.dirname(typescriptFile), "tsc.js");
   await run([processHost.execPath, tscFile, "-p", bakeProject], bakeRoot, "Bake build");
 }
