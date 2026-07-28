@@ -8,12 +8,16 @@
     "baguette": "./src/compiler.ts"
   },
   "scripts": {
-    "check": "tsc -p tsconfig.json --noEmit"
+    "check": "tsc -p tsconfig.json --noEmit && npm run bake:check",
+    "bake:check": "tsc -p vendor/bake/tsconfig.json --noEmit && tsc -p vendor/bake/tsconfig.core.json --noEmit"
   },
   "dependencies": {
     "assemblyscript": "0.28.19",
     "binaryen": "130.0.0-nightly.20260609",
     "typescript": "^5.9.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0"
   },
   "engines": {
     "bun": ">=1.1.0",

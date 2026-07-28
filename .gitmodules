@@ -1,3 +1,6 @@
 [submodule "vendor/kittyx"]
 	path = vendor/kittyx
 	url = https://github.com/kitty-crow/kittyx.git
+[submodule "vendor/bake"]
+	path = vendor/bake
+	url = https://github.com/kitty-crow/bake.git
