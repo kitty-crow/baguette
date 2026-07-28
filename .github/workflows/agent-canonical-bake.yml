@@ -1,0 +1,104 @@
+name: Canonical Bake integration
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: read
+
+jobs:
+  integrate:
+    if: github.head_ref == 'agent/canonical-bake'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/canonical-bake
+          fetch-depth: 0
+          submodules: recursive
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Finalise dependency tree
+        run: |
+          set -Eeuo pipefail
+          git submodule add https://github.com/kitty-crow/bake.git vendor/bake
+          git -C vendor/bake checkout bb7bee5c1926de056bec72288d5e2ee28e8e383b
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('src/compiler.ts')
+          text = path.read_text()
+          line = 'import "./bake-stage.ts";\n'
+          if not text.startswith(line):
+              path.write_text(line + text)
+          PY
+          rm .github/workflows/agent-canonical-bake.yml
+          git config user.name "Kitty Crow"
+          git config user.email "141717449+kitty-crow@users.noreply.github.com"
+          git add -A
+          git commit -m "Integrate Bake into Baguette compilation"
+          git push origin HEAD:agent/canonical-bake
+
+      - name: Install
+        run: npm install --package-lock=false
+
+      - name: Check Baguette and Bake
+        run: npm run check
+
+      - name: Verify Teto compatibility
+        run: |
+          set -Eeuo pipefail
+          git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/kitty-crow/teto.git ../teto-check
+          rm -rf ../teto-check/baguette
+          mkdir -p ../teto-check/baguette
+          rsync -a --exclude .git --exclude node_modules ./ ../teto-check/baguette/
+          cd ../teto-check
+          npm install
+          npm run teto:build
+
+      - name: Verify Sandsara compatibility
+        run: |
+          set -Eeuo pipefail
+          git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/kitty-crow/sandsara-track-viewer.git ../sandsara-check
+          rm -rf ../sandsara-check/baguette
+          mkdir -p ../sandsara-check/baguette
+          rsync -a --exclude .git --exclude node_modules ./ ../sandsara-check/baguette/
+          cd ../sandsara-check
+          npm install
+          npm run build:router-wasm
+
+      - name: Remove obsolete branch runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs?branch=agent/canonical-bake&per_page=100" \
+            --jq '.workflow_runs[].id' | while read -r run_id; do
+              if [ "$run_id" != "$GITHUB_RUN_ID" ]; then
+                gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" || true
+              fi
+            done
+
+      - name: Remove merged work branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -Eeuo pipefail
+          for attempt in $(seq 1 180); do
+            merged_at="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.merged_at // empty')"
+            if [ -n "$merged_at" ]; then
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$GITHUB_HEAD_REF" || true
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Pull request was not merged before the cleanup window closed" >&2
+          exit 1
