@@ -1,3 +1,4 @@
+import "./bake-stage.ts";
 import ts from "typescript";
 
 /** Baguette 0.2.6: kernel-independent ahead-of-time TypeScript-to-WebAssembly compiler. */
