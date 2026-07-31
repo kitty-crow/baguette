@@ -1,8 +1,8 @@
 // Synthetic application core; no product source or assets are used here.
-type Reader = "sun" | "moon";
+type Reader = number;
 
 function isReader(value: unknown): value is Reader {
-  return value === "sun" || value === "moon";
+  return value === 1 || value === 2;
 }
 
 class Counter {
@@ -40,6 +40,6 @@ export function score(value: number): number {
   const [left, right] = pair;
   const counter = new Counter();
   const box: Box | null = { value: counter.add(left + right) };
-  const reader: Reader = isReader("sun") ? "sun" : "moon";
-  return safe(read(box) + (reader === "sun" ? 1 : 0));
+  const reader: Reader = isReader(1) ? 1 : 2;
+  return safe(read(box) + (reader === 1 ? 1 : 0));
 }
