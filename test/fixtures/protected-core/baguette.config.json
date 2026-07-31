@@ -17,7 +17,8 @@
     { "name": "protected-core", "threaded": false }
   ],
   "allowedHostImports": [
-    { "module": "env", "name": "abort", "kind": "function" }
+    { "module": "env", "name": "abort", "kind": "function" },
+    { "module": "env", "name": "memory", "kind": "memory" }
   ],
   "bakeLowering": "wide",
   "materialiseInferredTypes": true,
