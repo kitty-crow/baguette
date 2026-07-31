@@ -184,6 +184,7 @@ async function postFile(file: string, level: ObfLevel, plan: ObfPlan, index: num
 export async function obfPost(root: string, plan: ObfPlan): Promise<void> {
   if (!plan.post) return;
   const list = await files(root);
+  if (!list.length) throw new Error(`post obfuscation found no WebAssembly modules in ${root}`);
   const output: ObfFile[] = [];
   for (let index = 0; index < list.length; index++) output.push(await postFile(list[index]!, plan.post, plan, index));
   await fs.writeFile(path.join(root, "baguette-obfuscation.json"), `${JSON.stringify({
