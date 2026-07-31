@@ -23,7 +23,7 @@ jobs:
       - name: Pack compiler runtime
         run: |
           mkdir snapshot
-          rsync -aL --exclude .git --exclude build --exclude dist ./ snapshot/
+          rsync -aL --exclude .git --exclude /build --exclude /dist ./ snapshot/
           printf '%s\n' "$(git rev-parse HEAD)" > snapshot/COMMIT
 
       - uses: actions/upload-artifact@v4
