@@ -1,5 +1,5 @@
 import ts from "typescript";
-import { obfPlan, obfPost, obfPre, type ObfConfig } from "./obf";
+import { obfPlan, obfPost, obfPre, type ObfConfig } from "./obf.ts";
 
 interface HostProcess {
   argv: string[];
