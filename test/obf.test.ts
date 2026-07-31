@@ -63,3 +63,13 @@ test("post processing preserves the Wasm ABI and records final hashes", async ()
     await fs.rm(root, { recursive: true, force: true });
   }
 });
+
+test("post processing refuses an empty release", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "bq-empty-"));
+  try {
+    const plan = obfPlan([], { post: "minimal" });
+    await assert.rejects(obfPost(root, plan), /found no WebAssembly modules/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
