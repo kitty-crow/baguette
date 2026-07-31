@@ -1,16 +1,20 @@
 import ts from "typescript";
+import { obfPlan, obfPost, obfPre, type ObfConfig } from "./obf";
 
 interface HostProcess {
   argv: string[];
   cwd(): string;
   env: Record<string, string | undefined>;
   execPath: string;
+  exitCode?: number;
+  on(event: "beforeExit", listener: () => void | Promise<void>): void;
 }
 interface HostFs {
   access(path: string): Promise<void>;
+  cp(source: string, destination: string, options: { recursive: boolean }): Promise<void>;
   mkdir(path: string, options: { recursive: boolean }): Promise<void>;
   readFile(path: string, encoding: "utf8"): Promise<string>;
-  rm(path: string, options: { recursive: boolean; force: boolean }): Promise<void>;
+  rm(path: string, options: { recursive?: boolean; force: boolean }): Promise<void>;
   writeFile(path: string, data: string): Promise<void>;
 }
 interface HostPath {
@@ -43,6 +47,8 @@ interface BaguetteConfig {
   preludeFile?: string;
   intrinsicModules?: string[];
   variants?: BaguetteVariant[];
+  bakeLowering?: "safe" | "wide";
+  obfuscation?: ObfConfig;
   [key: string]: unknown;
 }
 
@@ -144,16 +150,25 @@ function parseProject(project: string): ts.Program {
   return ts.createProgram({ rootNames: parsed.fileNames, options: parsed.options });
 }
 
+function lowering(value: unknown): "safe" | "wide" {
+  if (value === undefined || value === "safe") return "safe";
+  if (value === "wide") return "wide";
+  throw new Error("Bake lowering must be safe or wide");
+}
+
 const originalConfigPath = pathHost.resolve(root, optionValue("--config") ?? "baguette.config.json");
 const configRoot = pathHost.dirname(originalConfigPath);
 const config = await readJson<BaguetteConfig>(originalConfigPath);
 if (!Array.isArray(config.entries) || config.entries.length === 0) {
   throw new Error(`${originalConfigPath} must define at least one TypeScript entry module`);
 }
+const plan = obfPlan(processHost.argv.slice(2), config.obfuscation);
+const bakeLowering = lowering(optionValue("--bake-lowering") ?? config.bakeLowering);
 
 const stageRoot = pathHost.resolve(configRoot, "build/baguette-bake");
 const inputDir = pathHost.join(stageRoot, "input");
 const outputRoot = pathHost.join(stageRoot, "src");
+const protectedRoot = pathHost.join(stageRoot, "protected");
 const inputProject = pathHost.join(inputDir, "tsconfig.json");
 const reportFile = pathHost.join(stageRoot, "bake-report.json");
 await fs.rm(stageRoot, { recursive: true, force: true });
@@ -178,11 +193,11 @@ await writeJson(inputProject, {
 });
 
 const moduleDir = pathHost.dirname(urlHost.fileURLToPath(import.meta.url));
-const bakeRoot = pathHost.resolve(moduleDir, "../vendor/bake");
+const bakeRoot = pathHost.resolve(processHost.env.BAGUETTE_BAKE_ROOT ?? pathHost.resolve(moduleDir, "../vendor/bake"));
 const bakeProject = pathHost.join(bakeRoot, "tsconfig.json");
 const bakeCli = pathHost.join(bakeRoot, "dist/cli.js");
 if (!await exists(bakeProject)) {
-  throw new Error("Baguette's Bake submodule is missing; run git submodule update --init --recursive");
+  throw new Error("Baguette's Bake source is missing; initialise the submodule or set BAGUETTE_BAKE_ROOT");
 }
 if (!await exists(bakeCli)) {
   const importMeta = import.meta as unknown as { resolve(specifier: string): string };
@@ -198,6 +213,7 @@ await run([
   "--project", inputProject,
   "--out-dir", outputRoot,
   "--report", reportFile,
+  "--lowering", bakeLowering,
   "--fail-on-warnings",
 ], root, "Bake");
 
@@ -207,6 +223,7 @@ const sources = program.getSourceFiles().filter(source =>
 );
 const commonRoot = commonDirectory(sources.map(source => pathHost.dirname(source.fileName)));
 const sourceSet = new Set(sources.map(source => normalise(source.fileName)));
+const finalRoot = await obfPre(outputRoot, protectedRoot, plan);
 
 function bakedSource(value: string): string {
   const absolute = normalise(pathHost.resolve(configRoot, value));
@@ -215,12 +232,12 @@ function bakedSource(value: string): string {
   if (relative.startsWith("..") || pathHost.isAbsolute(relative)) {
     throw new Error(`Bake source ${value} is outside the emitted programme root`);
   }
-  return pathHost.resolve(outputRoot, relative);
+  return pathHost.resolve(finalRoot, relative);
 }
 
-const finalProject = pathHost.join(outputRoot, "tsconfig.json");
+const finalProject = pathHost.join(finalRoot, "tsconfig.json");
 await writeJson(finalProject, {
-  extends: relativeJson(outputRoot, projectPath),
+  extends: relativeJson(finalRoot, projectPath),
   compilerOptions: {
     noEmit: true,
     rootDir: ".",
@@ -231,8 +248,8 @@ await writeJson(finalProject, {
     sourceMap: false,
   },
   files: sources.map(source => relativeJson(
-    outputRoot,
-    pathHost.resolve(outputRoot, pathHost.relative(commonRoot, source.fileName)),
+    finalRoot,
+    pathHost.resolve(finalRoot, pathHost.relative(commonRoot, source.fileName)),
   )),
   include: [],
   exclude: [],
@@ -244,6 +261,8 @@ const bakedConfig: Record<string, unknown> = {
   entries: config.entries.map(bakedSource),
   intrinsicModules: (config.intrinsicModules ?? []).map(bakedSource),
 };
+delete bakedConfig.bakeLowering;
+delete bakedConfig.obfuscation;
 if (config.generatedDir !== undefined) bakedConfig.generatedDir = pathHost.resolve(configRoot, config.generatedDir);
 if (config.outDir !== undefined) bakedConfig.outDir = pathHost.resolve(configRoot, config.outDir);
 if (config.preludeFile !== undefined) bakedConfig.preludeFile = pathHost.resolve(configRoot, config.preludeFile);
@@ -257,4 +276,19 @@ if (config.variants !== undefined) {
 const bakedConfigPath = pathHost.join(stageRoot, "baguette.config.json");
 await writeJson(bakedConfigPath, bakedConfig);
 setConfigArg(bakedConfigPath);
-console.log(`Baguette: Bake prepared ${sources.length} source module(s)`);
+console.log(`Baguette: Bake prepared ${sources.length} source module(s) with ${bakeLowering} lowering`);
+if (plan.pre) console.log(`Baguette: pre obfuscation ${plan.pre}`);
+
+let postStarted = false;
+processHost.on("beforeExit", async () => {
+  if (postStarted || !plan.post || processHost.exitCode && processHost.exitCode !== 0) return;
+  postStarted = true;
+  try {
+    const output = pathHost.resolve(configRoot, config.outDir ?? "dist/teto");
+    await obfPost(output, plan);
+    console.log(`Baguette: post obfuscation ${plan.post}`);
+  } catch (error) {
+    processHost.exitCode = 1;
+    console.error(`Baguette post obfuscation failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+});
