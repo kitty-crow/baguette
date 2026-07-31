@@ -3,6 +3,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 
 export type ObfLevel = "minimal" | "balanced" | "hell";
+type WasmBytes = Uint8Array<ArrayBuffer>;
 
 export interface ObfConfig {
   pre?: boolean | ObfLevel;
@@ -14,10 +15,10 @@ export interface ObfConfig {
 }
 
 export interface ObfPlan {
-  readonly pre?: ObfLevel;
-  readonly post?: ObfLevel;
+  readonly pre: ObfLevel | undefined;
+  readonly post: ObfLevel | undefined;
   readonly seed: number;
-  readonly preCommand?: readonly string[];
+  readonly preCommand: readonly string[] | undefined;
   readonly wasmTools: string;
   readonly wasmOpt: string;
 }
@@ -99,17 +100,19 @@ export async function obfPre(input: string, output: string, plan: ObfPlan): Prom
   return output;
 }
 
-async function bytes(file: string): Promise<Uint8Array> {
+async function bytes(file: string): Promise<WasmBytes> {
   const data = await fs.readFile(file);
-  return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  const output = new Uint8Array(data.byteLength);
+  output.set(data);
+  return output;
 }
 
-async function sha(data: Uint8Array): Promise<string> {
+async function sha(data: WasmBytes): Promise<string> {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", data));
   return [...digest].map(value => value.toString(16).padStart(2, "0")).join("");
 }
 
-function shape(data: Uint8Array): WasmShape {
+function shape(data: WasmBytes): WasmShape {
   const module = new WebAssembly.Module(data);
   const imports = WebAssembly.Module.imports(module).map(item => `${item.kind}:${item.module}:${item.name}`).sort();
   const exports = WebAssembly.Module.exports(module).map(item => `${item.kind}:${item.name}`).sort();
