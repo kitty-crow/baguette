@@ -1,3 +1,4 @@
+// Synthetic application core; no product source or assets are used here.
 type Reader = "sun" | "moon";
 
 function isReader(value: unknown): value is Reader {
