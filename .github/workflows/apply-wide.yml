@@ -27,11 +27,11 @@ jobs:
       - name: Apply and verify
         run: |
           set -Eeuo pipefail
-          cat .apply-wide2.00 .apply-wide.01 .apply-wide.02 .apply-wide2.03 | base64 -d | gzip -d > /tmp/wide.patch
+          cat .apply-wide2.00 .apply-wide2.01 .apply-wide2.02 .apply-wide2.03 | base64 -d | gzip -d > /tmp/wide.patch
           git apply --index /tmp/wide.patch
           git update-index --add --cacheinfo 160000,a4884a8235e87ca0b44fe1c95581da6531283eee,vendor/bake
           rm .apply-wide.00 .apply-wide.01 .apply-wide.02 .apply-wide.03
-          rm .apply-wide2.00 .apply-wide2.03
+          rm .apply-wide2.00 .apply-wide2.01 .apply-wide2.02 .apply-wide2.03
           rm .github/workflows/apply-wide.yml
           rm -f .github/workflows/source-snapshot.yml
           git add -A
