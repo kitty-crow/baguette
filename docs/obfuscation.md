@@ -12,6 +12,8 @@ The pre stage runs the configured `obfuscation.preCommand` against an isolated c
 
 The post stage uses `wasm-tools mutate --preserve-semantics` and `wasm-opt` stripping. Minimal strips metadata, balanced adds four deterministic mutation rounds, and hell adds sixteen. Baguette validates the final module and rejects any transformation that changes its import or export ABI.
 
+Install `wasm-tools` and Binaryen on the release worker, or set `obfuscation.wasmTools` and `obfuscation.wasmOpt` to pinned executable paths. Missing tools fail the protected build rather than silently producing an unprotected release.
+
 The final hashes are recorded in `baguette-obfuscation.json`. The ordinary Baguette manifest remains the record of the compiler output before the optional protection stage.
 
 Configuration:
