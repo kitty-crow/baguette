@@ -15,15 +15,20 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Pack compiler sources
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install compiler dependencies
+        run: npm install --package-lock=false
+
+      - name: Pack compiler runtime
         run: |
           mkdir snapshot
-          rsync -a --exclude .git --exclude node_modules --exclude build --exclude dist ./ snapshot/
+          rsync -a --exclude .git --exclude build --exclude dist ./ snapshot/
           printf '%s\n' "$(git rev-parse HEAD)" > snapshot/COMMIT
 
       - uses: actions/upload-artifact@v4
         with:
-          name: baguette-wide-source
+          name: baguette-wide-runtime
           path: snapshot
           if-no-files-found: error
           retention-days: 1
