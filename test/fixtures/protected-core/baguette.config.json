@@ -16,6 +16,9 @@
   "variants": [
     { "name": "protected-core", "threaded": false }
   ],
+  "allowedHostImports": [
+    { "module": "env", "name": "abort", "kind": "function" }
+  ],
   "bakeLowering": "wide",
   "materialiseInferredTypes": true,
   "asyncLowering": "state-machine"
