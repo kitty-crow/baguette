@@ -1,0 +1,29 @@
+name: Compiler snapshot
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Pack compiler sources
+        run: |
+          mkdir snapshot
+          rsync -a --exclude .git --exclude node_modules --exclude build --exclude dist ./ snapshot/
+          printf '%s\n' "$(git rev-parse HEAD)" > snapshot/COMMIT
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: baguette-wide-source
+          path: snapshot
+          if-no-files-found: error
+          retention-days: 1
