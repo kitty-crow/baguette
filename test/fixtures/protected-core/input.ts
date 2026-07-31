@@ -14,12 +14,16 @@ class Counter {
   }
 }
 
-interface Box {
+class Box {
   value: number;
+
+  constructor(value: number) {
+    this.value = value;
+  }
 }
 
-function read(box: Box | null): number {
-  return box === null ? 0 : box.value;
+function read(box: Box): number {
+  return box.value;
 }
 
 function safe(value: number): number {
@@ -32,14 +36,10 @@ function safe(value: number): number {
 }
 
 export function score(value: number): number {
-  const values = [value, 2, 3];
-  let total = 0;
-  for (const item of values) total += item;
-  const fallback: number | null = value > 0 ? value : null;
-  const pair = [total, fallback ?? 0];
-  const [left, right] = pair;
   const counter = new Counter();
-  const box: Box | null = { value: counter.add(left + right) };
+  const left = counter.add(value + 5);
+  const right = value > 0 ? value : 0;
+  const box = new Box(left + right);
   const reader: Reader = isReader(1) ? 1 : 2;
   return safe(read(box) + (reader === 1 ? 1 : 0));
 }
