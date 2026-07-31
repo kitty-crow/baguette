@@ -56,5 +56,10 @@
   "completeKernel": false,
   "productionKernel": "Thistle",
   "materialiseInferredTypes": true,
-  "asyncLowering": "state-machine"
+  "asyncLowering": "state-machine",
+  "bakeLowering": "safe",
+  "obfuscation": {
+    "pre": false,
+    "post": false
+  }
 }
