@@ -8,11 +8,12 @@
     "baguette": "./src/compiler.ts"
   },
   "scripts": {
-    "check": "tsc -p tsconfig.json --noEmit && npm run bake:check && npm run test:obf && npm run test:wide",
+    "check": "tsc -p tsconfig.json --noEmit && npm run bake:check && npm run test:obf && npm run test:wide && npm run audit:tarot",
     "bake:check": "tsc -p vendor/bake/tsconfig.json --noEmit && tsc -p vendor/bake/tsconfig.core.json --noEmit",
     "test:obf": "node --experimental-strip-types --test test/obf.test.ts",
     "test:protected": "bun src/compiler.ts --config test/fixtures/protected-core/baguette.config.json --skip-determinism-check",
-    "test:wide": "node test/wide.mjs"
+    "test:wide": "node test/wide.mjs",
+    "audit:tarot": "node test/tarot-audit.mjs"
   },
   "dependencies": {
     "assemblyscript": "0.28.19",
