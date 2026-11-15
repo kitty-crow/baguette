@@ -34,7 +34,7 @@ export const assertCanonicalThistleSource = (config: ThistleSourceContract): voi
   if (!entries?.some(canonical)) {
     throw new Error("Canonical Thistle build must compile src/native/kernel.ts");
   }
-  if (entries.some(path => /(?:^|\\/)src\\/core\\/kernel\\.ts$/.test(normalise(path)))) {
+  if (entries.some(path => normalise(path) === "src/core/kernel.ts" || normalise(path).endsWith("/src/core/kernel.ts"))) {
     throw new Error("Teto must compile the canonical native Thistle kernel, not the host-only adapter");
   }
   if (entries.some(separate)) {
