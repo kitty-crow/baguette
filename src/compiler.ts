@@ -77,6 +77,7 @@ interface BaguetteConfig {
   productionKernel?: string;
   canonicalSource?: string;
   canonicalRevision?: string;
+  canonicalOriginalEntries?: string[];
   materialiseInferredTypes?: boolean;
   asyncLowering?: "state-machine" | "reject";
 }
@@ -1923,6 +1924,11 @@ if (validateOnly) {
     configuration: relative(configPath),
     entryPoints: config.entries,
     generatedFrom: sourceEntries.map(entry => ({ path: entry.path, sha256: entry.sha256 })),
+    // The lowered paths belong to Bake's output tree. Preserve the original
+    // Thistle kernel entry and its immutable checkout revision separately.
+    canonicalSource: config.canonicalSource ?? null,
+    canonicalRevision: config.canonicalRevision ?? null,
+    canonicalOriginalEntries: config.canonicalOriginalEntries ?? config.entries,
     intrinsicModules: [...intrinsicModules].map(relative),
     preludes: Object.fromEntries([...variantPreludes].map(([name, item]) => [name, { path: item.path ?? null, sha256: item.sha256 }])),
     sourceSha256: sourceHash,
