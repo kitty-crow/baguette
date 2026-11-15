@@ -18,7 +18,7 @@ export interface ThistleSourceContract {
 }
 
 const normalise = (path: string): string => path.replaceAll("\\", "/");
-const canonical = (path: string): boolean => /(?:^|\/)src\/core\/kernel\.ts$/.test(normalise(path));
+const canonical = (path: string): boolean => /(?:^|\/)src\/native\/kernel\.ts$/.test(normalise(path));
 const separate = (path: string): boolean => /(?:^|\/)src\/teto\/kernel\.ts$/.test(normalise(path));
 
 export const assertCanonicalThistleSource = (config: ThistleSourceContract): void => {
@@ -32,7 +32,10 @@ export const assertCanonicalThistleSource = (config: ThistleSourceContract): voi
   }
   const entries = config.canonicalOriginalEntries ?? config.entries;
   if (!entries?.some(canonical)) {
-    throw new Error("Canonical Thistle build must compile src/core/kernel.ts");
+    throw new Error("Canonical Thistle build must compile src/native/kernel.ts");
+  }
+  if (entries.some(path => /(?:^|\\/)src\\/core\\/kernel\\.ts$/.test(normalise(path)))) {
+    throw new Error("Teto must compile the canonical native Thistle kernel, not the host-only adapter");
   }
   if (entries.some(separate)) {
     throw new Error("Canonical Thistle build must not compile src/teto/kernel.ts");

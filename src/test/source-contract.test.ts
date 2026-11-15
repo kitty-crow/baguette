@@ -8,36 +8,45 @@ const valid = {
   canonicalRevision: sha,
   productionKernel: "Thistle",
   completeKernel: true,
-  entries: ["src/core/kernel.ts", "src/teto/abi.ts"],
+  entries: ["src/native/kernel.ts", "src/native/abi.ts"],
   memory: { initialPages: 8192, maximumPages: 32768 },
 } as const;
 
 test("canonical Thistle build accepts one authoritative kernel", () => {
   assert.doesNotThrow(() => assertCanonicalThistleSource(valid));
   assert.doesNotThrow(() => assertCanonicalThistleSource({
-    ...valid, entries: ["/tmp/build/thistle-source/build/baguette-bake/src/core/kernel.ts"],
+    ...valid, entries: ["/tmp/build/thistle-source/build/baguette-bake/src/native/kernel.ts"],
   }));
 });
 
 test("canonical Thistle build rejects an independent Teto executor", () => {
   assert.throws(() => assertCanonicalThistleSource({ ...valid, entries: ["src/teto/kernel.ts"] }),
-    /src\/core\/kernel/);
+    /src\/native\/kernel/);
   assert.throws(() => assertCanonicalThistleSource({
-    ...valid, entries: ["src/core/kernel.ts", "src/teto/kernel.ts"],
+    ...valid, entries: ["src/native/kernel.ts", "src/teto/kernel.ts"],
   }), /must not compile/);
+});
+
+test("canonical Teto must reject the host-only Thistle adapter", () => {
+  assert.throws(() => assertCanonicalThistleSource({
+    ...valid, entries: ["src/core/kernel.ts"],
+  }), /src\/native\/kernel/);
+  assert.throws(() => assertCanonicalThistleSource({
+    ...valid, entries: ["src/native/kernel.ts", "src/core/kernel.ts"],
+  }), /host-only adapter/);
 });
 
 test("canonical Thistle build rejects a hidden transitive Teto kernel", () => {
   assert.throws(() => assertCanonicalThistleSource({
     ...valid,
     canonicalOriginalModules: [
-      "/tmp/thistle/src/core/kernel.ts",
-      "/tmp/thistle/src/teto/abi.ts",
+      "/tmp/thistle/src/native/kernel.ts",
+      "/tmp/thistle/src/native/abi.ts",
       "/tmp/thistle/src/teto/kernel.ts",
     ],
   }), /transitively imports/);
   assert.doesNotThrow(() => assertCanonicalThistleSource({
-    ...valid, canonicalOriginalModules: ["/tmp/thistle/src/core/kernel.ts", "/tmp/thistle/src/fs/vfs.ts"],
+    ...valid, canonicalOriginalModules: ["/tmp/thistle/src/native/kernel.ts", "/tmp/thistle/src/fs/vfs.ts"],
   }));
 });
 
