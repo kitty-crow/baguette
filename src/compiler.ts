@@ -1,5 +1,6 @@
 import "./bake-stage.ts";
 import ts from "typescript";
+import { assertCanonicalThistleSource } from "./source-contract.ts";
 
 /** Baguette 0.2.6: kernel-independent ahead-of-time TypeScript-to-WebAssembly compiler. */
 const BAGUETTE_VERSION = "0.2.6";
@@ -74,6 +75,10 @@ interface BaguetteConfig {
   allowedHostImports?: Array<{ module: string; name: string; kind: WebAssembly.ImportExportKind }>;
   completeKernel?: boolean;
   productionKernel?: string;
+  canonicalSource?: string;
+  canonicalRevision?: string;
+  canonicalOriginalEntries?: string[];
+  canonicalOriginalModules?: string[];
   materialiseInferredTypes?: boolean;
   asyncLowering?: "state-machine" | "reject";
 }
@@ -200,6 +205,7 @@ const parseJson = async <T>(path: string): Promise<T> => {
 };
 
 const config = await parseJson<BaguetteConfig>(configPath);
+assertCanonicalThistleSource(config);
 if (!Array.isArray(config.entries) || config.entries.length === 0) throw new Error(`${relative(configPath)} must define at least one TypeScript entry module`);
 const projectPath = normalise(config.project ?? "tsconfig.json");
 const generated = normalise(config.generatedDir ?? "build/teto-generated");
@@ -1919,6 +1925,12 @@ if (validateOnly) {
     configuration: relative(configPath),
     entryPoints: config.entries,
     generatedFrom: sourceEntries.map(entry => ({ path: entry.path, sha256: entry.sha256 })),
+    // The lowered paths belong to Bake's output tree. Preserve the original
+    // Thistle kernel entry and its immutable checkout revision separately.
+    canonicalSource: config.canonicalSource ?? null,
+    canonicalRevision: config.canonicalRevision ?? null,
+    canonicalOriginalEntries: config.canonicalOriginalEntries ?? config.entries,
+    canonicalOriginalModules: config.canonicalOriginalModules ?? null,
     intrinsicModules: [...intrinsicModules].map(relative),
     preludes: Object.fromEntries([...variantPreludes].map(([name, item]) => [name, { path: item.path ?? null, sha256: item.sha256 }])),
     sourceSha256: sourceHash,

@@ -1,4 +1,5 @@
 import ts from "typescript";
+import { assertCanonicalThistleSource } from "./source-contract.ts";
 
 interface HostProcess {
   argv: string[];
@@ -147,6 +148,7 @@ function parseProject(project: string): ts.Program {
 const originalConfigPath = pathHost.resolve(root, optionValue("--config") ?? "baguette.config.json");
 const configRoot = pathHost.dirname(originalConfigPath);
 const config = await readJson<BaguetteConfig>(originalConfigPath);
+assertCanonicalThistleSource(config);
 if (!Array.isArray(config.entries) || config.entries.length === 0) {
   throw new Error(`${originalConfigPath} must define at least one TypeScript entry module`);
 }
@@ -240,6 +242,12 @@ await writeJson(finalProject, {
 
 const bakedConfig: Record<string, unknown> = {
   ...config,
+  // Bake flattens source paths. Preserve the exact original entries so
+  // Baguette can validate the same canonical Thistle origin after lowering.
+  canonicalOriginalEntries: config.entries,
+  // Source modules include transitive imports, not just configured entries.
+  // Reject a separate Teto executor even when hidden behind an ABI wrapper.
+  canonicalOriginalModules: sources.map(source => source.fileName),
   project: finalProject,
   entries: config.entries.map(bakedSource),
   intrinsicModules: (config.intrinsicModules ?? []).map(bakedSource),
