@@ -12,6 +12,7 @@ export interface ThistleSourceContract {
   productionKernel?: string;
   completeKernel?: boolean;
   entries?: readonly string[];
+  canonicalOriginalEntries?: readonly string[];
   memory?: { initialPages?: number; maximumPages?: number };
 }
 
@@ -28,10 +29,11 @@ export const assertCanonicalThistleSource = (config: ThistleSourceContract): voi
   if (config.productionKernel !== "Thistle" || config.completeKernel !== true) {
     throw new Error("Canonical Thistle build cannot claim a partial or alternative kernel");
   }
-  if (!config.entries?.some(canonical)) {
+  const entries = config.canonicalOriginalEntries ?? config.entries;
+  if (!entries?.some(canonical)) {
     throw new Error("Canonical Thistle build must compile src/core/kernel.ts");
   }
-  if (config.entries.some(separate)) {
+  if (entries.some(separate)) {
     throw new Error("Canonical Thistle build must not compile src/teto/kernel.ts");
   }
   const pages = config.memory?.initialPages;

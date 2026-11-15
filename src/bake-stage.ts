@@ -242,6 +242,9 @@ await writeJson(finalProject, {
 
 const bakedConfig: Record<string, unknown> = {
   ...config,
+  // Bake flattens source paths. Preserve the exact original entries so
+  // Baguette can validate the same canonical Thistle origin after lowering.
+  canonicalOriginalEntries: config.entries,
   project: finalProject,
   entries: config.entries.map(bakedSource),
   intrinsicModules: (config.intrinsicModules ?? []).map(bakedSource),
