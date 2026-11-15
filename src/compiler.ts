@@ -1,5 +1,6 @@
 import "./bake-stage.ts";
 import ts from "typescript";
+import { assertCanonicalThistleSource } from "./source-contract.js";
 
 /** Baguette 0.2.6: kernel-independent ahead-of-time TypeScript-to-WebAssembly compiler. */
 const BAGUETTE_VERSION = "0.2.6";
@@ -74,6 +75,8 @@ interface BaguetteConfig {
   allowedHostImports?: Array<{ module: string; name: string; kind: WebAssembly.ImportExportKind }>;
   completeKernel?: boolean;
   productionKernel?: string;
+  canonicalSource?: string;
+  canonicalRevision?: string;
   materialiseInferredTypes?: boolean;
   asyncLowering?: "state-machine" | "reject";
 }
@@ -200,6 +203,7 @@ const parseJson = async <T>(path: string): Promise<T> => {
 };
 
 const config = await parseJson<BaguetteConfig>(configPath);
+assertCanonicalThistleSource(config);
 if (!Array.isArray(config.entries) || config.entries.length === 0) throw new Error(`${relative(configPath)} must define at least one TypeScript entry module`);
 const projectPath = normalise(config.project ?? "tsconfig.json");
 const generated = normalise(config.generatedDir ?? "build/teto-generated");

@@ -1,4 +1,5 @@
 import ts from "typescript";
+import { assertCanonicalThistleSource } from "./source-contract.js";
 
 interface HostProcess {
   argv: string[];
@@ -147,6 +148,7 @@ function parseProject(project: string): ts.Program {
 const originalConfigPath = pathHost.resolve(root, optionValue("--config") ?? "baguette.config.json");
 const configRoot = pathHost.dirname(originalConfigPath);
 const config = await readJson<BaguetteConfig>(originalConfigPath);
+assertCanonicalThistleSource(config);
 if (!Array.isArray(config.entries) || config.entries.length === 0) {
   throw new Error(`${originalConfigPath} must define at least one TypeScript entry module`);
 }

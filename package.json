@@ -9,7 +9,8 @@
   },
   "scripts": {
     "check": "tsc -p tsconfig.json --noEmit && npm run bake:check",
-    "bake:check": "tsc -p vendor/bake/tsconfig.json --noEmit && tsc -p vendor/bake/tsconfig.core.json --noEmit"
+    "bake:check": "tsc -p vendor/bake/tsconfig.json --noEmit && tsc -p vendor/bake/tsconfig.core.json --noEmit",
+    "test:source-contract": "bun test src/test/source-contract.test.ts"
   },
   "dependencies": {
     "assemblyscript": "0.28.19",
