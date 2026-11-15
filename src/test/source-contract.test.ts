@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { assertCanonicalThistleSource } from "../source-contract.js";
+import { assertCanonicalThistleSource } from "../source-contract.ts";
 
 const sha = "f851ea0c70a6be819be70aa0112ca1f84d67d873";
 const valid = {

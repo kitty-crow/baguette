@@ -1,6 +1,6 @@
 import "./bake-stage.ts";
 import ts from "typescript";
-import { assertCanonicalThistleSource } from "./source-contract.js";
+import { assertCanonicalThistleSource } from "./source-contract.ts";
 
 /** Baguette 0.2.6: kernel-independent ahead-of-time TypeScript-to-WebAssembly compiler. */
 const BAGUETTE_VERSION = "0.2.6";

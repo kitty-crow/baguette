@@ -1,5 +1,5 @@
 import ts from "typescript";
-import { assertCanonicalThistleSource } from "./source-contract.js";
+import { assertCanonicalThistleSource } from "./source-contract.ts";
 
 interface HostProcess {
   argv: string[];
