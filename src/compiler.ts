@@ -78,6 +78,7 @@ interface BaguetteConfig {
   canonicalSource?: string;
   canonicalRevision?: string;
   canonicalOriginalEntries?: string[];
+  canonicalOriginalModules?: string[];
   materialiseInferredTypes?: boolean;
   asyncLowering?: "state-machine" | "reject";
 }
@@ -1929,6 +1930,7 @@ if (validateOnly) {
     canonicalSource: config.canonicalSource ?? null,
     canonicalRevision: config.canonicalRevision ?? null,
     canonicalOriginalEntries: config.canonicalOriginalEntries ?? config.entries,
+    canonicalOriginalModules: config.canonicalOriginalModules ?? null,
     intrinsicModules: [...intrinsicModules].map(relative),
     preludes: Object.fromEntries([...variantPreludes].map(([name, item]) => [name, { path: item.path ?? null, sha256: item.sha256 }])),
     sourceSha256: sourceHash,

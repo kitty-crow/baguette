@@ -27,6 +27,20 @@ test("canonical Thistle build rejects an independent Teto executor", () => {
   }), /must not compile/);
 });
 
+test("canonical Thistle build rejects a hidden transitive Teto kernel", () => {
+  assert.throws(() => assertCanonicalThistleSource({
+    ...valid,
+    canonicalOriginalModules: [
+      "/tmp/thistle/src/core/kernel.ts",
+      "/tmp/thistle/src/teto/abi.ts",
+      "/tmp/thistle/src/teto/kernel.ts",
+    ],
+  }), /transitively imports/);
+  assert.doesNotThrow(() => assertCanonicalThistleSource({
+    ...valid, canonicalOriginalModules: ["/tmp/thistle/src/core/kernel.ts", "/tmp/thistle/src/fs/vfs.ts"],
+  }));
+});
+
 test("canonical Thistle build refuses spoofed provenance or incomplete ABI", () => {
   assert.throws(() => assertCanonicalThistleSource({ ...valid, canonicalRevision: "" }), /immutable/);
   assert.throws(() => assertCanonicalThistleSource({ ...valid, completeKernel: false }), /partial/);

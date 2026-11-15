@@ -13,6 +13,7 @@ export interface ThistleSourceContract {
   completeKernel?: boolean;
   entries?: readonly string[];
   canonicalOriginalEntries?: readonly string[];
+  canonicalOriginalModules?: readonly string[];
   memory?: { initialPages?: number; maximumPages?: number };
 }
 
@@ -35,6 +36,9 @@ export const assertCanonicalThistleSource = (config: ThistleSourceContract): voi
   }
   if (entries.some(separate)) {
     throw new Error("Canonical Thistle build must not compile src/teto/kernel.ts");
+  }
+  if (config.canonicalOriginalModules?.some(separate)) {
+    throw new Error("Canonical Thistle build transitively imports an independently maintained Teto kernel");
   }
   const pages = config.memory?.initialPages;
   const maximum = config.memory?.maximumPages;

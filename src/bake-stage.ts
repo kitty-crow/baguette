@@ -245,6 +245,9 @@ const bakedConfig: Record<string, unknown> = {
   // Bake flattens source paths. Preserve the exact original entries so
   // Baguette can validate the same canonical Thistle origin after lowering.
   canonicalOriginalEntries: config.entries,
+  // Source modules include transitive imports, not just configured entries.
+  // Reject a separate Teto executor even when hidden behind an ABI wrapper.
+  canonicalOriginalModules: sources.map(source => source.fileName),
   project: finalProject,
   entries: config.entries.map(bakedSource),
   intrinsicModules: (config.intrinsicModules ?? []).map(bakedSource),
