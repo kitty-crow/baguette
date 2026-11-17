@@ -33,13 +33,25 @@ jobs:
 
       - name: Verify Teto compatibility
         run: |
-          git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/kitty-crow/teto.git ../teto-check
-          rm -rf ../teto-check/baguette
-          mkdir -p ../teto-check/baguette
-          rsync -a --exclude .git --exclude node_modules ./ ../teto-check/baguette/
-          cd ../teto-check
-          npm install
-          npm run teto:build
+          git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/kittycrow-kittyx/teto.git ../teto-check
+          if [ -f ../teto-check/scripts/regenerate.sh ]; then
+            # Test this compiler revision, not just the previously committed WAT.
+            git -C ../teto-check/baguette fetch --depth 1 "$GITHUB_WORKSPACE" "$GITHUB_SHA"
+            git -C ../teto-check/baguette checkout --detach FETCH_HEAD
+            git -C ../teto-check add baguette
+            git -C ../teto-check submodule update --init --recursive
+            cd ../teto-check
+            npm install --package-lock=false
+            bash scripts/regenerate.sh
+          else
+            # Compatibility with Teto revisions preceding the source-only layout.
+            rm -rf ../teto-check/baguette
+            mkdir -p ../teto-check/baguette
+            rsync -a --exclude .git --exclude node_modules ./ ../teto-check/baguette/
+            cd ../teto-check
+            npm install
+            npm run teto:build
+          fi
 
       - name: Verify Sandsara compatibility
         run: |
