@@ -31,6 +31,9 @@ jobs:
       - name: Test canonical Thistle source contract
         run: npm run test:source-contract
 
+      - name: Test modular WAT emission
+        run: npm run test:wat-modules
+
       - name: Verify Teto compatibility
         run: |
           git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/kittycrow-kittyx/teto.git ../teto-check

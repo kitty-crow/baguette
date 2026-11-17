@@ -1,4 +1,5 @@
 import "./bake-stage.ts";
+import { modularWat } from "./wat-modules.ts";
 import ts from "typescript";
 import { assertCanonicalThistleSource } from "./source-contract.ts";
 
@@ -158,6 +159,7 @@ const hasOption = (name: string): boolean => processHost.argv.includes(name);
 const validateOnly = hasOption("--validate-only");
 const skipDeterminism = hasOption("--skip-determinism-check");
 const skipOptimiser = hasOption("--skip-wasm-opt");
+const emitModularWat = hasOption("--emit-modular-wat");
 const configPath = pathHost.resolve(root, optionValue("--config") ?? "baguette.config.json");
 const configRoot = pathHost.dirname(configPath);
 
@@ -1866,6 +1868,7 @@ if (validateOnly) {
   await fs.mkdir(generated, { recursive: true });
   await fs.mkdir(output, { recursive: true });
   const variantResults: Record<string, VariantResult> = {};
+  const modularLayouts: Record<string, string> = {};
   for (const variant of variants) {
     const sourcePath = `${generated}/${variant.name}.ts`;
     const rawPath = `${generated}/${variant.name}.raw.wasm`;
@@ -1893,6 +1896,31 @@ if (validateOnly) {
     };
     console.log(`Baguette: compiling ${variant.name} (${variant.threaded ? "threaded" : "baseline"})`);
     await asc(rawPath, watPath);
+    if (emitModularWat) {
+      // Preserve the relative source tree from the common lowered-source root.
+      const parts = sourceEntries.map(entry => entry.path.split("/"));
+      let common = 0;
+      while (parts.every(item => item.length > common + 1 && item[common] === parts[0]?.[common])) common++;
+      const modules = sourceEntries.map((entry, index) => {
+        const source = parts[index]!.slice(common).join("/");
+        return {
+          source,
+          file: source.replace(/\.tsx?$/, ".wat"),
+          symbolPrefix: `__bq_${shortHash(entry.path)}_`,
+          exports: abiFunctions.filter(fn => fn.sourceName.startsWith(entry.path + "#")).map(fn => fn.name),
+        };
+      });
+      const emitted = modularWat(await readText(watPath), modules);
+      const destination = `${generated}/${variant.name}`;
+      for (const [file, body] of emitted.files) {
+        const target = `${destination}/${file}`;
+        await fs.mkdir(pathHost.dirname(target), { recursive: true });
+        await bun.write(target, body);
+      }
+      const layout = `${destination}/layout.json`;
+      await bun.write(layout, JSON.stringify(emitted.layout, null, 2) + "\n");
+      modularLayouts[variant.name] = relative(layout);
+    }
     await optimise(rawPath, wasmPath);
     if (!skipDeterminism) {
       console.log(`Baguette: verifying deterministic rebuild for ${variant.name}`);
@@ -1952,6 +1980,7 @@ if (validateOnly) {
       deterministicRebuildVerified: !skipDeterminism,
       nativeInstantiationVerified: true,
       generatedWAT: variants.map(variant => relative(`${generated}/${variant.name}.wat`)),
+      modularWAT: modularLayouts,
     },
     completeKernel: config.completeKernel ?? false,
     productionKernel: config.productionKernel ?? "unset",
