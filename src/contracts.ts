@@ -38,7 +38,7 @@ export interface BaguetteConfig {
   memory: BaguetteMemoryConfig;
   runtime: "stub" | "minimal" | "incremental" | null;
   variants: BaguetteVariant[];
-  allowedHostImports: Array<{ module: string | null; name: string; kind: WebAssembly.ImportExportKind }>;
+  allowedHostImports: Array<{ module: string; name: string; kind: WebAssembly.ImportExportKind }> | null;
   completeKernel: boolean | null;
   productionKernel: string | null;
   canonicalSource: string | null;

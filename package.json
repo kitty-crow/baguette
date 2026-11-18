@@ -8,7 +8,7 @@
     "baguette": "./src/compiler.ts"
   },
   "scripts": {
-    "check": "npm run guards && tsc -p tsconfig.json --noEmit",
+    "check": "tsc -p tsconfig.json --noEmit && npm run guards",
     "bake:check": "tsc -p vendor/bake/tsconfig.json --noEmit && tsc -p vendor/bake/tsconfig.core.json --noEmit",
     "test:source-contract": "bun test src/test/source-contract.test.ts",
     "test:wat-modules": "bun test src/test/wat-modules.test.ts",

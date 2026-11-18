@@ -25,7 +25,7 @@ jobs:
       - name: Install
         run: npm install --package-lock=false
 
-      - name: Check Baguette and Bake
+      - name: Check Baguette
         run: npm run check
 
       - name: Test canonical Thistle source contract
