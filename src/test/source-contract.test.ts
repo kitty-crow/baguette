@@ -1,16 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { parseConfig } from "../contracts.ts";
 import { assertCanonicalThistleSource } from "../source-contract.ts";
 
 const sha = "f851ea0c70a6be819be70aa0112ca1f84d67d873";
-const valid = {
+const valid = parseConfig(JSON.stringify({
   canonicalSource: "Thistle",
   canonicalRevision: sha,
   productionKernel: "Thistle",
   completeKernel: true,
   entries: ["src/native/kernel.ts", "src/native/abi.ts"],
   memory: { initialPages: 8192, maximumPages: 32768 },
-} as const;
+}));
 
 test("canonical Thistle build accepts one authoritative kernel", () => {
   assert.doesNotThrow(() => assertCanonicalThistleSource(valid));
@@ -54,9 +55,9 @@ test("canonical Thistle build refuses spoofed provenance or incomplete ABI", () 
   assert.throws(() => assertCanonicalThistleSource({ ...valid, canonicalRevision: "" }), /immutable/);
   assert.throws(() => assertCanonicalThistleSource({ ...valid, completeKernel: false }), /partial/);
   assert.throws(() => assertCanonicalThistleSource({ ...valid, productionKernel: "Teto" }), /alternative/);
-  assert.throws(() => assertCanonicalThistleSource({ ...valid, memory: { initialPages: 0, maximumPages: 32768 } }), /memory/);
+  assert.throws(() => assertCanonicalThistleSource({ ...valid, memory: { ...valid.memory, initialPages: 0, maximumPages: 32768 } }), /memory/);
 });
 
 test("other Baguette programmes are not subjected to Teto-specific rules", () => {
-  assert.doesNotThrow(() => assertCanonicalThistleSource({ entries: ["src/another-app.ts"] }));
+  assert.doesNotThrow(() => assertCanonicalThistleSource(parseConfig(JSON.stringify({ entries: ["src/another-app.ts"] }))));
 });

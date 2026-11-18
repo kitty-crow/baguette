@@ -36,7 +36,7 @@ const blockCommentEnd = (text: string, from: number): number => {
 const skipTrivia = (text: string, from: number): number => {
   let i = from;
   while (i < text.length) {
-    if (/\s/.test(required(text[i], "text[i]"))) { i++; continue; }
+    if (/\s/.test(text.charAt(i))) { i++; continue; }
     if (text.startsWith(";;", i)) {
       const end = text.indexOf("\n", i + 2);
       i = end === -1 ? text.length : end + 1;
@@ -51,7 +51,7 @@ const skipTrivia = (text: string, from: number): number => {
 const stringEnd = (text: string, from: number): number => {
   let i = from;
   while (i < text.length) {
-    const char = text[i++];
+    const char = text.charAt(i++);
     if (char === "\\") { i++; continue; }
     if (char === '"') return i;
   }
@@ -64,7 +64,7 @@ const endOfField = (text: string, from: number): number => {
   while (i < text.length) {
     const next = skipTrivia(text, i);
     if (next !== i) { i = next; continue; }
-    const ch = text[i++];
+    const ch = text.charAt(i++);
     if (ch === '"') { i = stringEnd(text, i); continue; }
     if (ch === "(") depth++;
     if (ch === ")" && --depth === 0) return i;
@@ -79,24 +79,24 @@ const splitFields = (text: string): { prefix: string; fields: Field[]; suffix: s
   if (!head) throw new Error("Expected a WebAssembly text module");
   let cursor = start + head[0].length;
   const name = skipTrivia(text, cursor);
-  const symbol = text[name] === "$" ? /^\$[^\s()]+/.exec(text.slice(name)) : undefined;
-  if (text[name] === "$" && !symbol) throw new Error("Invalid WAT module name");
+  const symbol = text.charAt(name) === "$" ? /^\$[^\s()]+/.exec(text.slice(name)) : null;
+  if (text.charAt(name) === "$" && !symbol) throw new Error("Invalid WAT module name");
   if (symbol) cursor = name + symbol[0].length;
   const prefix = text.slice(0, cursor);
   const fields: Field[] = [];
   while (cursor < text.length) {
     const at = skipTrivia(text, cursor);
-    if (text[at] === ")" && skipTrivia(text, at + 1) !== text.length) throw new Error("Unexpected content after WAT module");
-    if (text[at] === ")") {
+    if (text.charAt(at) === ")" && skipTrivia(text, at + 1) !== text.length) throw new Error("Unexpected content after WAT module");
+    if (text.charAt(at) === ")") {
       return { prefix, fields, suffix: text.slice(cursor) };
     }
-    if (text[at] !== "(") throw new Error("Expected a WAT module field");
+    if (text.charAt(at) !== "(") throw new Error("Expected a WAT module field");
     const end = endOfField(text, at);
     const kindAt = skipTrivia(text, at + 1);
-    const kind = /^[^\s()]+/.exec(text.slice(kindAt))?.[0];
+    const kind = (/^[^\s()]+/.exec(text.slice(kindAt)) ?? [])[0] ?? null;
     if (!kind) throw new Error("Missing WAT field kind");
     const symbolAt = skipTrivia(text, kindAt + kind.length);
-    const symbol = /^\$[^\s()]+/.exec(text.slice(symbolAt))?.[0] ?? "";
+    const symbol = ((/^\$[^\s()]+/.exec(text.slice(symbolAt)) ?? [])[0] ?? null) ?? "";
     fields.push({ text: text.slice(cursor, end), kind, symbol });
     cursor = end;
   }
@@ -113,10 +113,10 @@ const safeRelativePath = (file: string): void => {
 const fieldOwner = (field: Field, prefixes: ReadonlyMap<string, string>, exports: ReadonlyMap<string, string>): string => {
   if (!["func", "global", "tag"].includes(field.kind)) return "module.wat";
   const name = field.symbol.slice(field.symbol.lastIndexOf("/") + 1).replace(/^\$/, "");
-  const privateOwner = /__bq_[a-f0-9]{8}_/.exec(name)?.[0];
-  const exportOwner = exports.get(name);
+  const privateOwner = (/__bq_[a-f0-9]{8}_/.exec(name) ?? [])[0] ?? null;
+  const exportOwner = exports.get(name) ?? null;
   if (privateOwner && !prefixes.has(privateOwner)) throw new Error("Unknown compiler symbol owner: " + field.symbol);
-  return exportOwner ?? (privateOwner ? required(prefixes.get(privateOwner), "private symbol owner") : "runtime.wat");
+  return exportOwner ?? (privateOwner ? required(prefixes.get(privateOwner) ?? null, "private symbol owner") : "runtime.wat");
 };
 
 /** Preserve backend declaration order and assign code to its compiler-owned module. */
@@ -143,7 +143,7 @@ export const modularWat = (text: string, modules: readonly SourceModule[]): {
   const order: [string, number, number][] = [];
   for (const field of fields) {
     const file = fieldOwner(field, prefixes, exports);
-    const current = required(files.get(file), "files.get(file)");
+    const current = required(files.get(file) ?? null, "files.get(file)");
     order.push([file, current.length, field.text.length]);
     files.set(file, current + field.text);
     counts.set(file, (counts.get(file) ?? 0) + 1);
@@ -156,7 +156,7 @@ export const modularWat = (text: string, modules: readonly SourceModule[]): {
     modules: modules.map(module => ({ source: module.source, file: module.file, fields: counts.get(module.file) ?? 0 })),
     order,
   };
-  const linked = prefix + order.map(([file, offset, length]) => required(files.get(file), "files.get(file)").slice(offset, offset + length)).join("") + suffix;
+  const linked = prefix + order.map(([file, offset, length]) => required(files.get(file) ?? null, "files.get(file)").slice(offset, offset + length)).join("") + suffix;
   if (linked !== text) throw new Error("Modular WAT changed backend output");
   return { files, layout };
 };

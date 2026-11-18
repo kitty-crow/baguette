@@ -110,7 +110,7 @@ const projectPath = normalise(config.project ?? "tsconfig.json");
 const generated = normalise(config.generatedDir ?? "build/teto-generated");
 const output = normalise(config.outDir ?? "dist/teto");
 const moduleBaseName = config.moduleBaseName ?? "teto";
-const variants = config.variants?.length ? config.variants : [{ name: moduleBaseName, threaded: false }, { name: `${moduleBaseName}-threads`, threaded: true }];
+const variants = config.variants.length ? config.variants : [{ name: moduleBaseName, threaded: false, preludeFile: null }, { name: `${moduleBaseName}-threads`, threaded: true, preludeFile: null }];
 const intrinsicModules = new Set((config.intrinsicModules ?? []).map(normalise));
 
 const defaultTypeAliases: Record<string, string> = {};
@@ -309,7 +309,7 @@ const symbolOf = (node: ts.Node): ts.Symbol | null => {
   return symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
 };
 const namespaceImportSymbol = (node: ts.Identifier): boolean => Boolean(rawSymbolOf(node)?.declarations?.some(declaration => ts.isNamespaceImport(declaration)));
-const abiExports = config.abi?.exports ?? null;
+const abiExports = config.abi.exports ?? null;
 const explicitAbiNames = Array.isArray(abiExports) ? new Set(abiExports) : null;
 const abiSymbols = new Map<ts.Symbol, string>();
 const abiFunctions: AbiFunction[] = [];
@@ -1681,8 +1681,8 @@ const instantiateImports = (threaded: boolean): WebAssembly.Imports => {
     const namespace = imports[item.module] ?? (imports[item.module] = {});
     if (item.kind === "memory") {
       namespace[item.name] = new WebAssembly.Memory({
-        initial: Math.max(1024, config.memory?.initialPages ?? 1024),
-        maximum: config.memory?.maximumPages ?? 32768,
+        initial: Math.max(1024, config.memory.initialPages ?? 1024),
+        maximum: config.memory.maximumPages ?? 32768,
         shared: threaded,
       });
     }
@@ -1710,14 +1710,14 @@ const verifyModule = async (wasmPath: string, threaded: boolean): Promise<Omit<V
   const exports = WebAssembly.Module.exports(module);
   const exportMap = new Map(exports.map(item => [item.name, item.kind]));
   for (const required of abiFunctions) if (exportMap.get(required.name) !== "function") throw new Error(`${relative(wasmPath)} is missing native function export ${required.name}`);
-  const unexpectedKinds = config.abi?.allowNonFunctionExports ? [] : exports.filter(item => item.kind !== "function");
+  const unexpectedKinds = config.abi.allowNonFunctionExports ? [] : exports.filter(item => item.kind !== "function");
   if (unexpectedKinds.length) throw new Error(`${relative(wasmPath)} unexpectedly exports non-function state: ${unexpectedKinds.map(item => `${item.name}:${item.kind}`).join(", ")}`);
   const instance = new WebAssembly.Instance(module, instantiateImports(threaded));
   const native = instance.exports as Record<string, WebAssembly.ExportValue>;
-  const verification = config.abi?.verify;
+  const verification = config.abi.verify;
   if (verification?.init) verifyFunction(native, wasmPath, verification.init, verification.initArgs, verification.initExpected);
   if (verification?.valid) verifyFunction(native, wasmPath, verification.valid, verification.validArgs, verification.validExpected);
-  for (const test of config.abi?.tests ?? []) {
+  for (const test of config.abi.tests ?? []) {
     const fn = native[test.function];
     if (typeof fn !== "function") throw new Error(`${relative(wasmPath)} lacks ABI test function ${test.function}`);
     const result = (fn as CallableFunction)(...(test.args ?? []).map(argumentValue));
@@ -1757,10 +1757,10 @@ const buildOutputs = async (): Promise<void> => {
     const asc = async (destination: string, textFile?: string): Promise<void> => {
       const command = ["node", `${root}/node_modules/assemblyscript/bin/asc.js`, sourcePath,
         "--outFile", destination, "--runtime", config.runtime ?? "stub", "--zeroFilledMemory",
-        "--initialMemory", String(config.memory?.initialPages ?? 256), "--maximumMemory", String(config.memory?.maximumPages ?? 32768),
+        "--initialMemory", String(config.memory.initialPages ?? 256), "--maximumMemory", String(config.memory.maximumPages ?? 32768),
         "--optimizeLevel", "3", "--shrinkLevel", "0", "--noAssert", "--enable", "simd"];
-      if (config.memory?.import !== false) command.push("--importMemory");
-      if (config.memory?.export !== true) command.push("--noExportMemory");
+      if (config.memory.import !== false) command.push("--importMemory");
+      if (config.memory.export !== true) command.push("--noExportMemory");
       if (textFile) command.push("--textFile", textFile);
       if (variant.threaded) command.push("--sharedMemory", "--enable", "threads");
       await run(command, `AssemblyScript backend for ${variant.name}`, 2, 180_000);

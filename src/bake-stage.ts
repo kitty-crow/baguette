@@ -1,6 +1,7 @@
 import { parseConfig, type BaguetteConfig, type JsonObject } from "./contracts.ts";
 import processHost from "node:process";
 import * as fs from "node:fs/promises";
+import { mkdirSync } from "node:fs";
 import * as pathHost from "node:path";
 import * as urlHost from "node:url";
 import * as childProcess from "node:child_process";
@@ -11,7 +12,7 @@ import { assertCanonicalThistleSource } from "./source-contract.ts";
 const root = processHost.cwd();
 
 function optionValue(name: string): string | null {
-  const direct = processHost.argv.find(value => value.startsWith(`${name}=`));
+  const direct = processHost.argv.find(value => value.startsWith(`${name}=`)) ?? null;
   if (direct) return direct.slice(name.length + 1);
   const index = processHost.argv.indexOf(name);
   return index >= 0 ? processHost.argv[index + 1] ?? null : null;
@@ -33,12 +34,12 @@ function setConfigArg(value: string): void {
 
 
 async function writeJson(path: string, value: JsonObject | BaguetteConfig): Promise<void> {
-  await fs.mkdir(pathHost.dirname(path), { recursive: true });
+  mkdirSync(pathHost.dirname(path), { recursive: true });
   await fs.writeFile(path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 async function run(command: string[], cwd: string, label: string): Promise<void> {
-  const executable = command[0];
+  const executable = command[0] ?? null;
   if (!executable) throw new Error(`${label} has no executable`);
   await new Promise<void>((resolve, reject) => {
     const child = childProcess.spawn(executable, command.slice(1), {
@@ -56,15 +57,15 @@ function normalise(value: string): string {
 }
 
 function commonDirectory(files: readonly string[]): string {
-  const firstFile = files[0];
+  const firstFile = files[0] ?? null;
   if (!firstFile) return root;
   const parts = files.map(file => normalise(file).split(pathHost.sep));
-  const first = parts[0];
+  const first = parts[0] ?? null;
   if (!first) return pathHost.dirname(firstFile);
   const shared: string[] = [];
   for (let index = 0; ; index++) {
-    const value = first[index];
-    if (value == null || !parts.every(item => item[index] === value)) break;
+    const value = first[index] ?? null;
+    if (value == null || !parts.every(item => (item[index] ?? null) === value)) break;
     shared.push(value);
   }
   return shared.join(pathHost.sep) || pathHost.dirname(firstFile);
@@ -76,9 +77,8 @@ function relativeJson(from: string, to: string): string {
 }
 
 function parseProject(project: string): ts.Program {
-  const config = ts.readConfigFile(project, ts.sys.readFile);
-  if (config.error) throw new Error(ts.flattenDiagnosticMessageText(config.error.messageText, "\n"));
-  const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, pathHost.dirname(project), {
+  const config = ts.readJsonConfigFile(project, ts.sys.readFile);
+  const parsed = ts.parseJsonSourceFileConfigFileContent(config, ts.sys, pathHost.dirname(project), {
     noEmit: true,
     incremental: false,
     composite: false,
@@ -103,7 +103,7 @@ const outputRoot = pathHost.join(stageRoot, "src");
 const inputProject = pathHost.join(inputDir, "tsconfig.json");
 const reportFile = pathHost.join(stageRoot, "bake-report.json");
 await fs.rm(stageRoot, { recursive: true, force: true });
-await fs.mkdir(inputDir, { recursive: true });
+mkdirSync(inputDir, { recursive: true });
 
 const projectPath = pathHost.resolve(configRoot, config.project ?? "tsconfig.json");
 const inputFiles = [...new Set([...config.entries, ...(config.intrinsicModules ?? [])]

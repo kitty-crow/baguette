@@ -20,10 +20,10 @@ const testCli = argv.has("--test-cli");
 const testWeb = argv.has("--test-web");
 const validateOnly = argv.has("--validate-only");
 const alternateConfig = processHost.argv.slice(2).some(value => value === "--config" || value.startsWith("--config="));
-const nativeBun = Boolean(processHost.versions.bun);
+const nativeBun = Boolean(processHost.versions.bun ?? null);
 
 const run = (command: string[], label: string): void => {
-  const exitCode = childProcess.spawnSync(required(command[0], "command executable"), command.slice(1), { cwd: processHost.cwd(), env: processHost.env, stdio: "inherit" }).status ?? 1;
+  const exitCode = childProcess.spawnSync(required(command[0] ?? null, "command executable"), command.slice(1), { cwd: processHost.cwd(), env: processHost.env, stdio: "inherit" }).status ?? 1;
   if (exitCode !== 0) throw new Error(`${label} failed with exit code ${exitCode}`);
 };
 
