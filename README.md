@@ -32,6 +32,8 @@ iteration. `BAGUETTE_BAKE_ENGINE=auto|host|wasm` selects Bake's policy engine.
 
 ## Documentation
 
+[Compiler module reference](docs/index.md). Run `npm run guards` for strict source, test and documentation checks.
+
 - [Compiler pipeline](docs/compiler.md)
 - [Configuration](docs/configuration.md)
 - [Supported TypeScript](docs/language-subset.md)

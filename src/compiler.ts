@@ -1,3 +1,5 @@
+import type { HostProcess, BaguetteVariant } from "./contracts.ts";
+import { required } from "./required.ts";
 import "./bake-stage.ts";
 import { modularWat } from "./wat-modules.ts";
 import ts from "typescript";
@@ -9,7 +11,6 @@ const MANIFEST_SCHEMA = 3;
 
 interface BunFile {
   arrayBuffer(): Promise<ArrayBuffer>;
-  text(): Promise<string>;
 }
 interface BunResult { exitCode: number; stdout: Uint8Array; stderr: Uint8Array; }
 interface BunSubprocess { exited: Promise<number>; kill(signal?: number | string): void; }
@@ -18,7 +19,6 @@ interface BunApi {
   write(path: string, data: string | Uint8Array): Promise<number>;
   spawn(command: string[], options?: { cwd?: string; env?: Record<string, string | undefined>; stdout?: "inherit"; stderr?: "inherit" }): BunSubprocess;
 }
-interface HostProcess { argv: string[]; cwd(): string; env: Record<string, string | undefined>; execPath: string; exit(code?: number): never; }
 interface HostFs {
   mkdir(path: string, options: { recursive: boolean }): Promise<void>;
   rm(path: string, options: { recursive: boolean; force: boolean }): Promise<void>;
@@ -56,7 +56,6 @@ interface BaguetteAbiConfig {
   verify?: BaguetteAbiVerification;
   tests?: BaguetteAbiTest[];
 }
-interface BaguetteVariantConfig { name: string; threaded?: boolean; preludeFile?: string; }
 interface BaguetteConfig {
   schema?: number;
   name?: string;
@@ -72,7 +71,7 @@ interface BaguetteConfig {
   abi?: BaguetteAbiConfig;
   memory?: BaguetteMemoryConfig;
   runtime?: "stub" | "minimal" | "incremental";
-  variants?: BaguetteVariantConfig[];
+  variants?: BaguetteVariant[];
   allowedHostImports?: Array<{ module: string; name: string; kind: WebAssembly.ImportExportKind }>;
   completeKernel?: boolean;
   productionKernel?: string;
@@ -126,7 +125,6 @@ const bun: BunApi = nativeBun ?? {
         const bytes = await fs.readFile(filePath);
         return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
       },
-      text(): Promise<string> { return fs.readFile(filePath, "utf8"); },
     };
   },
   async write(filePath: string, data: string | Uint8Array): Promise<number> {
@@ -189,7 +187,7 @@ const sha256 = async (bytes: Uint8Array): Promise<string> => {
   return [...digest].map(byte => byte.toString(16).padStart(2, "0")).join("");
 };
 const readBytes = async (path: string): Promise<Uint8Array<ArrayBuffer>> => new Uint8Array(await bun.file(path).arrayBuffer());
-const readText = async (path: string): Promise<string> => bun.file(path).text();
+const readText = async (path: string): Promise<string> => fs.readFile(path, "utf8");
 const normalise = (value: string): string => pathHost.normalize(pathHost.resolve(configRoot, value));
 const relative = (value: string): string => pathHost.relative(root, value).split(pathHost.sep).join("/");
 const lineAndColumn = (source: ts.SourceFile, position: number): string => {
@@ -298,7 +296,7 @@ for (const entry of entryPaths) visitModule(entry);
 
 const sourceEntries: SourceEntry[] = [];
 for (const absolutePath of orderedPaths) {
-  const source = sourceByAbsolute.get(absolutePath)!;
+  const source = required(sourceByAbsolute.get(absolutePath), "sourceByAbsolute.get(absolutePath)");
   const text = await readText(absolutePath);
   sourceEntries.push({ path: relative(absolutePath), absolutePath, text, source, sha256: await sha256(encoder.encode(text)) });
 }
@@ -551,10 +549,10 @@ const nativeTypeNode = (type: ts.Type, location: ts.Node, depth = 0): ts.TypeNod
     const hasNullish = withoutUndefined.length !== type.types.length || type.types.some(item => Boolean(item.flags & ts.TypeFlags.Null));
     const concrete = withoutUndefined.filter(item => !(item.flags & ts.TypeFlags.Null));
     if (concrete.length === 1) {
-      const inner = nativeTypeNode(concrete[0]!, location, depth + 1);
+      const inner = nativeTypeNode(required(concrete[0], "concrete[0]"), location, depth + 1);
       if (!inner) return undefined;
       // AssemblyScript models nullable managed references with `T | null`.
-      if (hasNullish && !(concrete[0]!.flags & (ts.TypeFlags.NumberLike | ts.TypeFlags.BigIntLike | ts.TypeFlags.BooleanLike))) {
+      if (hasNullish && !(required(concrete[0], "concrete[0]").flags & (ts.TypeFlags.NumberLike | ts.TypeFlags.BigIntLike | ts.TypeFlags.BooleanLike))) {
         return ts.factory.createUnionTypeNode([inner, ts.factory.createLiteralTypeNode(ts.factory.createNull())]);
       }
       return inner;
@@ -569,8 +567,8 @@ const nativeTypeNode = (type: ts.Type, location: ts.Node, depth = 0): ts.TypeNod
     if (!elements.length) return ts.factory.createTypeReferenceNode("Array", [ts.factory.createTypeReferenceNode("f64", undefined)]);
     const nodes = elements.map(item => nativeTypeNode(item, location, depth + 1));
     if (nodes.some(item => !item)) return undefined;
-    const printed = nodes.map(item => ts.createPrinter().printNode(ts.EmitHint.Unspecified, item!, location.getSourceFile()));
-    if (printed.every(item => item === printed[0])) return ts.factory.createTypeReferenceNode("Array", [nodes[0]!]);
+    const printed = nodes.map(item => ts.createPrinter().printNode(ts.EmitHint.Unspecified, required(item, "item"), location.getSourceFile()));
+    if (printed.every(item => item === printed[0])) return ts.factory.createTypeReferenceNode("Array", [required(nodes[0], "nodes[0]")]);
     return undefined;
   }
   if (checker.isArrayType(type)) {
@@ -580,7 +578,7 @@ const nativeTypeNode = (type: ts.Type, location: ts.Node, depth = 0): ts.TypeNod
   }
   const signatures = checker.getSignaturesOfType(type, ts.SignatureKind.Call);
   if (signatures.length === 1) {
-    const signature = signatures[0]!;
+    const signature = required(signatures[0], "signatures[0]");
     const parameters: ts.ParameterDeclaration[] = [];
     for (const parameter of signature.getParameters()) {
       const declaration = parameter.valueDeclaration ?? parameter.declarations?.[0] ?? location;
@@ -798,7 +796,7 @@ for (const entry of sourceEntries) {
   collect(entry.source);
   for (const statement of entry.source.statements) {
     if (!ts.isVariableStatement(statement) || statement.declarationList.declarations.length !== 1) continue;
-    const variable = statement.declarationList.declarations[0]!;
+    const variable = required(statement.declarationList.declarations[0], "statement.declarationList.declarations[0]");
     if (!ts.isIdentifier(variable.name) || !variable.initializer
       || !(ts.isArrowFunction(variable.initializer) || ts.isFunctionExpression(variable.initializer))
       || !functionHasAsyncModifier(variable.initializer)) continue;
@@ -890,7 +888,7 @@ const promisedResultType = (node: ts.FunctionDeclaration | ts.ArrowFunction | ts
   if (!signature) throw new Error(`${lineAndColumn(node.getSourceFile(), node.getStart())}: BQ2004: cannot resolve async function signature`);
   if (node.type && ts.isTypeReferenceNode(node.type) && ts.isIdentifier(node.type.typeName)
     && node.type.typeName.text === "Promise" && node.type.typeArguments?.length === 1) {
-    const innerNode = node.type.typeArguments[0]!;
+    const innerNode = required(node.type.typeArguments[0], "node.type.typeArguments[0]");
     const sourceType = checker.getTypeFromTypeNode(innerNode);
     const isVoid = innerNode.kind === ts.SyntaxKind.VoidKeyword || Boolean(sourceType.flags & (ts.TypeFlags.Void | ts.TypeFlags.Undefined));
     const native = isVoid ? ts.factory.createKeywordTypeNode(ts.SyntaxKind.VoidKeyword) : assemblyType(innerNode);
@@ -1026,7 +1024,7 @@ const lowerSource = (entry: SourceEntry): string => {
             if (statement.declarationList.declarations.length !== 1 || awaitedDeclarations.length !== 1) {
               throw new Error(`${lineAndColumn(source, statement.getStart(source))}: BQ2014: an awaited variable declaration must be the only declaration in its statement`);
             }
-            const declaration = awaitedDeclarations[0]!;
+            const declaration = required(awaitedDeclarations[0], "awaitedDeclarations[0]");
             if (!ts.isIdentifier(declaration.name) || !declaration.initializer || !ts.isAwaitExpression(declaration.initializer)) return undefined;
             awaitExpression = declaration.initializer; kind = "variable"; target = declaration.name;
           }
@@ -1058,7 +1056,7 @@ const lowerSource = (entry: SourceEntry): string => {
 
       const sequenceAlwaysReturns = (statements: readonly ts.Statement[]): boolean => {
         if (!statements.length) return false;
-        return statementAlwaysReturns(statements[statements.length - 1]!);
+        return statementAlwaysReturns(required(statements[statements.length - 1], "statements[statements.length - 1]"));
       };
       const statementAlwaysReturns = (statement: ts.Statement): boolean => {
         if (ts.isReturnStatement(statement)) return true;
@@ -1139,8 +1137,8 @@ const lowerSource = (entry: SourceEntry): string => {
         };
         if (!findPath(root)) throw new Error(`${lineAndColumn(source, awaitExpression.getStart(source))}: BQ2020: internal coroutine expression path could not be resolved`);
         for (let index = 0; index + 1 < ancestry.length; index++) {
-          const current = ancestry[index]!;
-          const parent = ancestry[index + 1]!;
+          const current = required(ancestry[index], "ancestry[index]");
+          const parent = required(ancestry[index + 1], "ancestry[index + 1]");
           if (ts.isBinaryExpression(parent)) {
             const shortCircuit = parent.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
               || parent.operatorToken.kind === ts.SyntaxKind.BarBarToken
@@ -1251,7 +1249,7 @@ const lowerSource = (entry: SourceEntry): string => {
         if (point.kind === "expression") return [ts.factory.createExpressionStatement(resumed)];
         if (point.kind === "return") return [resolveAndReturn(point.resultVoid ? undefined : resumed)];
         if (point.kind === "variable" && point.target && ts.isIdentifier(point.target)) {
-          const binding = frameBindings.get(symbolOf(point.target)!);
+          const binding = frameBindings.get(required(symbolOf(point.target), "symbolOf(point.target)"));
           if (!binding) throw new Error(`${lineAndColumn(source, point.target.getStart(source))}: BQ2012: cannot find coroutine local ${point.target.text}`);
           return [ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(bindingAccess(binding), ts.SyntaxKind.EqualsToken, resumed))];
         }
@@ -1354,7 +1352,7 @@ const lowerSource = (entry: SourceEntry): string => {
       let compileStatement: (statement: ts.Statement, next: number, loop?: LoopTargets) => number;
       const compileSequence = (statements: readonly ts.Statement[], next: number, loop?: LoopTargets): number => {
         let entry = next;
-        for (let index = statements.length - 1; index >= 0; index--) entry = compileStatement(statements[index]!, entry, loop);
+        for (let index = statements.length - 1; index >= 0; index--) entry = compileStatement(required(statements[index], "statements[index]"), entry, loop);
         return entry;
       };
       compileStatement = (statement: ts.Statement, next: number, loop?: LoopTargets): number => {
@@ -1436,7 +1434,7 @@ const lowerSource = (entry: SourceEntry): string => {
           const clauseEntries = new Map<ts.CaseOrDefaultClause, number>();
           let fallthroughState = next;
           for (let index = statement.caseBlock.clauses.length - 1; index >= 0; index--) {
-            const clause = statement.caseBlock.clauses[index]!;
+            const clause = required(statement.caseBlock.clauses[index], "statement.caseBlock.clauses[index]");
             const entry = compileSequence(clause.statements, fallthroughState, { breakState: next, continueState: loop?.continueState });
             clauseEntries.set(clause, entry);
             fallthroughState = entry;
@@ -1446,9 +1444,9 @@ const lowerSource = (entry: SourceEntry): string => {
           // Each label therefore receives its own resumable state. A label may
           // suspend without evaluating later labels or losing the discriminant.
           const defaultClause = statement.caseBlock.clauses.find(ts.isDefaultClause);
-          let dispatchEntry = defaultClause ? clauseEntries.get(defaultClause)! : next;
+          let dispatchEntry = defaultClause ? required(clauseEntries.get(defaultClause), "clauseEntries.get(defaultClause)") : next;
           for (let index = statement.caseBlock.clauses.length - 1; index >= 0; index--) {
-            const clause = statement.caseBlock.clauses[index]!;
+            const clause = required(statement.caseBlock.clauses[index], "statement.caseBlock.clauses[index]");
             if (!ts.isCaseClause(clause)) continue;
             const labelField = `__bq_switch_case_${expressionCaptureIndex++}`;
             expressionCaptureFields.push({ field: labelField, type: discriminantType });
@@ -1460,7 +1458,7 @@ const lowerSource = (entry: SourceEntry): string => {
                 ts.factory.createConditionalExpression(
                   ts.factory.createBinaryExpression(captureAccess, ts.SyntaxKind.EqualsEqualsEqualsToken, labelAccess),
                   ts.factory.createToken(ts.SyntaxKind.QuestionToken),
-                  ts.factory.createNumericLiteral(clauseEntries.get(clause)!),
+                  ts.factory.createNumericLiteral(required(clauseEntries.get(clause), "clauseEntries.get(clause)")),
                   ts.factory.createToken(ts.SyntaxKind.ColonToken),
                   ts.factory.createNumericLiteral(dispatchEntry),
                 ),
@@ -1526,7 +1524,7 @@ const lowerSource = (entry: SourceEntry): string => {
             if (statement.initializer.declarations.length !== 1) {
               throw new Error(`${lineAndColumn(source, statement.initializer.getStart(source))}: BQ2027: for-of requires exactly one declaration`);
             }
-            bindForOfName(statement.initializer.declarations[0]!.name, elementAccess);
+            bindForOfName(required(statement.initializer.declarations[0], "statement.initializer.declarations[0]").name, elementAccess);
           } else {
             bindElementStatements.push(ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(rewrite(statement.initializer), ts.SyntaxKind.EqualsToken, elementAccess)));
           }
@@ -1582,7 +1580,7 @@ const lowerSource = (entry: SourceEntry): string => {
       const constructorParameters: ts.ParameterDeclaration[] = [
         ts.factory.createParameterDeclaration(undefined, undefined, "__bq_task", undefined, taskType, undefined),
         ...(unit.receiverType ? [ts.factory.createParameterDeclaration(undefined, undefined, "__bq_this", undefined, unit.receiverType, undefined)] : []),
-        ...bindings.filter(item => item.parameter).map(item => ts.factory.createParameterDeclaration(undefined, undefined, item.parameter!.name, undefined, item.type, undefined)),
+        ...bindings.filter(item => item.parameter).map(item => ts.factory.createParameterDeclaration(undefined, undefined, required(item.parameter, "item.parameter").name, undefined, item.type, undefined)),
       ];
       const constructorStatements: ts.Statement[] = [
         ts.factory.createExpressionStatement(ts.factory.createCallExpression(ts.factory.createSuper(), undefined, [])),
@@ -1590,7 +1588,7 @@ const lowerSource = (entry: SourceEntry): string => {
       ];
       if (unit.receiverType) constructorStatements.push(ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(ts.factory.createPropertyAccessExpression(ts.factory.createThis(), "__bq_this"), ts.SyntaxKind.EqualsToken, ts.factory.createIdentifier("__bq_this"))));
       for (const binding of bindings.filter(item => item.parameter)) {
-        const name = (binding.parameter!.name as ts.Identifier).text;
+        const name = (required(binding.parameter, "binding.parameter").name as ts.Identifier).text;
         constructorStatements.push(ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(ts.factory.createPropertyAccessExpression(ts.factory.createThis(), binding.field), ts.SyntaxKind.EqualsToken, ts.factory.createIdentifier(name))));
       }
       frameMembers.push(ts.factory.createConstructorDeclaration(undefined, constructorParameters, ts.factory.createBlock(constructorStatements, true)));
@@ -1643,7 +1641,7 @@ const lowerSource = (entry: SourceEntry): string => {
         return [...lowered.support, lowered.wrapper];
       }
       if (ts.isVariableStatement(node) && node.declarationList.declarations.length === 1) {
-        const declaration = node.declarationList.declarations[0]!;
+        const declaration = required(node.declarationList.declarations[0], "node.declarationList.declarations[0]");
         if (ts.isIdentifier(declaration.name) && declaration.initializer
           && (ts.isArrowFunction(declaration.initializer) || ts.isFunctionExpression(declaration.initializer))
           && functionHasAsyncModifier(declaration.initializer) && asyncLowering === "state-machine") {
@@ -1732,7 +1730,7 @@ const lowerSource = (entry: SourceEntry): string => {
       }
       if (ts.isSatisfiesExpression(node)) return ts.visitNode(node.expression, visit);
       if (ts.isVariableStatement(node) && node.declarationList.declarations.length === 1) {
-        const declaration = node.declarationList.declarations[0]!;
+        const declaration = required(node.declarationList.declarations[0], "node.declarationList.declarations[0]");
         if (ts.isIdentifier(declaration.name) && declaration.initializer && ts.isArrowFunction(declaration.initializer)) {
           const symbol = symbolOf(declaration.name);
           const isAbi = Boolean(symbol && abiSymbols.has(symbol));
@@ -1764,7 +1762,7 @@ const lowerSource = (entry: SourceEntry): string => {
   };
   const result = ts.transform(source, [transformer]);
   try {
-    const lowered = result.transformed[0]!;
+    const lowered = required(result.transformed[0], "result.transformed[0]");
     let printed = ts.createPrinter({ newLine: ts.NewLineKind.LineFeed, removeComments: false }).printFile(lowered);
     // Non-function exports are internal in the flattened module. AssemblyScript would otherwise expose mutable kernel state.
     printed = printed.replace(/^export\s+(?=(?:const|let|var|class|enum|namespace|interface|type)\b)/gm, "");
@@ -1790,7 +1788,7 @@ for (const variant of variants) {
 }
 const sourceHash = await sha256(encoder.encode(sourceEntries.map(entry => `${entry.path}\n${entry.text}`).join("\n")));
 const loweredSourceHashes = Object.fromEntries(await Promise.all(variants.map(async variant => {
-  const prelude = variantPreludes.get(variant.name)!;
+  const prelude = required(variantPreludes.get(variant.name), "variantPreludes.get(variant.name)");
   return [variant.name, await sha256(encoder.encode(`${prelude.text}\n${customPrelude}\n${generatedBody}`))] as const;
 })));
 
@@ -1876,7 +1874,7 @@ if (validateOnly) {
     const optimisedRepeatPath = `${generated}/${variant.name}.repeat.wasm`;
     const wasmPath = `${output}/${variant.name}.wasm`;
     const watPath = `${generated}/${variant.name}.wat`;
-    const variantPrelude = variantPreludes.get(variant.name)!.text;
+    const variantPrelude = required(variantPreludes.get(variant.name), "variantPreludes.get(variant.name)").text;
     const sourceText = `${variantPrelude}\n${customPrelude}\n${generatedBody}`;
     await bun.write(sourcePath, sourceText);
     const asc = async (destination: string, textFile?: string): Promise<void> => {
@@ -1902,7 +1900,7 @@ if (validateOnly) {
       let common = 0;
       while (parts.every(item => item.length > common + 1 && item[common] === parts[0]?.[common])) common++;
       const modules = sourceEntries.map((entry, index) => {
-        const source = parts[index]!.slice(common).join("/");
+        const source = required(parts[index], "parts[index]").slice(common).join("/");
         return {
           source,
           file: source.replace(/\.tsx?$/, ".wat"),
@@ -2000,7 +1998,7 @@ if (validateOnly) {
   console.log(`Baguette ${BAGUETTE_VERSION} generated native ${config.name ?? "Module"} WebAssembly from ${sourceEntries.length} TypeScript modules`);
   console.log(`  entries: ${config.entries.join(", ")}`);
   console.log(`  ABI: ${abiFunctions.length} direct WebAssembly function exports`);
-  for (const variant of variants) { const result = variantResults[`${variant.name}.wasm`]!; console.log(`  ${result.file}  ${result.bytes} bytes  sha256 ${result.sha256}`); }
+  for (const variant of variants) { const result = required(variantResults[`${variant.name}.wasm`], "variantResults[`${variant.name}.wasm`]"); console.log(`  ${result.file}  ${result.bytes} bytes  sha256 ${result.sha256}`); }
   console.log(`  deterministic rebuild: ${skipDeterminism ? "skipped" : "verified"}`);
   console.log("  native module instantiation and configured ABI checks: verified");
 }

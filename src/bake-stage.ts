@@ -1,12 +1,7 @@
+import type { HostProcess, BaguetteVariant } from "./contracts.ts";
 import ts from "typescript";
 import { assertCanonicalThistleSource } from "./source-contract.ts";
 
-interface HostProcess {
-  argv: string[];
-  cwd(): string;
-  env: Record<string, string | undefined>;
-  execPath: string;
-}
 interface HostFs {
   access(path: string): Promise<void>;
   mkdir(path: string, options: { recursive: boolean }): Promise<void>;
@@ -35,7 +30,6 @@ interface HostChildProcess {
     stdio: "inherit";
   }): HostChild;
 }
-interface BaguetteVariant { name: string; threaded?: boolean; preludeFile?: string; }
 interface BaguetteConfig {
   project?: string;
   entries: string[];

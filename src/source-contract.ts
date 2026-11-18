@@ -22,6 +22,8 @@ const canonical = (path: string): boolean => /(?:^|\/)src\/native\/kernel\.ts$/.
 const separate = (path: string): boolean => /(?:^|\/)src\/teto\/kernel\.ts$/.test(normalise(path));
 
 export const assertCanonicalThistleSource = (config: ThistleSourceContract): void => {
+  // Only explicitly opted-in builds inherit the canonical Thistle source contract.
+  // Verify original and transitive entries independently to detect substitute kernels after lowering.
   if (config.canonicalSource === undefined) return;
   if (config.canonicalSource !== "Thistle") throw new Error("Unknown authoritative kernel source");
   if (!/^[a-f0-9]{40}$/.test(config.canonicalRevision ?? "")) {

@@ -1,3 +1,4 @@
+import { required } from "./required.ts";
 export interface SourceModule {
   readonly source: string;
   readonly file: string;
@@ -23,7 +24,7 @@ export interface WatLayout {
 const skipTrivia = (text: string, from: number): number => {
   let i = from;
   while (i < text.length) {
-    if (/\s/.test(text[i]!)) { i++; continue; }
+    if (/\s/.test(required(text[i], "text[i]"))) { i++; continue; }
     if (text.startsWith(";;", i)) {
       const end = text.indexOf("\n", i + 2);
       i = end === -1 ? text.length : end + 1;
@@ -133,9 +134,9 @@ export const modularWat = (text: string, modules: readonly SourceModule[]): {
       const privateOwner = /__bq_[a-f0-9]{8}_/.exec(name)?.[0];
       const exportOwner = exports.get(name);
       if (privateOwner && !prefixes.has(privateOwner)) throw new Error("Unknown compiler symbol owner: " + field.symbol);
-      file = exportOwner ?? (privateOwner ? prefixes.get(privateOwner)! : "runtime.wat");
+      file = exportOwner ?? (privateOwner ? required(prefixes.get(privateOwner), "prefixes.get(privateOwner)") : "runtime.wat");
     }
-    const current = files.get(file)!;
+    const current = required(files.get(file), "files.get(file)");
     order.push([file, current.length, field.text.length]);
     files.set(file, current + field.text);
     counts.set(file, (counts.get(file) ?? 0) + 1);
@@ -148,7 +149,7 @@ export const modularWat = (text: string, modules: readonly SourceModule[]): {
     modules: modules.map(module => ({ source: module.source, file: module.file, fields: counts.get(module.file) ?? 0 })),
     order,
   };
-  const linked = prefix + order.map(([file, offset, length]) => files.get(file)!.slice(offset, offset + length)).join("") + suffix;
+  const linked = prefix + order.map(([file, offset, length]) => required(files.get(file), "files.get(file)").slice(offset, offset + length)).join("") + suffix;
   if (linked !== text) throw new Error("Modular WAT changed backend output");
   return { files, layout };
 };

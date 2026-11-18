@@ -5,7 +5,7 @@
       "name": "KITTYX",
       "repository": "kittycrow-kittyx/kittyx",
       "path": "vendor/kittyx",
-      "commit": "076774c11103c996910c0f939deff9164e5f12d9",
+      "commit": "a48b7121112dc501f76f8fb30b271b173341e877",
       "relationship": "contract",
       "direct": true,
       "updatePolicy": "pull-request"
@@ -14,7 +14,7 @@
       "name": "Bake",
       "repository": "kittycrow-kittyx/bake",
       "path": "vendor/bake",
-      "commit": "3b70f134e0912d8d8aadf10fb13b5df2f4bd361c",
+      "commit": "338e15dc6e024bbe7604593888d935a3ce9f957b",
       "relationship": "build",
       "direct": true,
       "updatePolicy": "pull-request"

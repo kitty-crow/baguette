@@ -1,3 +1,4 @@
+import { required } from "../required.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { modularWat } from "../wat-modules.ts";
@@ -21,15 +22,15 @@ const modules = [
 ];
 test("preserves source ownership and reconstructs the backend module exactly", () => {
   const { files, layout } = modularWat(source, modules);
-  assert.match(files.get("core/local.wat")!, /__bq_12345678_local/);
-  assert.match(files.get("main.wat")!, /\(func \$build\/target\/run/);
-  assert.match(files.get("runtime.wat")!, /\$~lib\/helper/);
-  assert.match(files.get("module.wat")!, /\(data/);
-  assert.equal(layout.modules[2]!.fields, 0);
-  assert.equal(layout.prefix + layout.order.map(([file, offset, length]) => files.get(file)!.slice(offset, offset + length)).join("") + layout.suffix, source);
+  assert.match(required(files.get("core/local.wat"), "files.get(\"core/local.wat\")"), /__bq_12345678_local/);
+  assert.match(required(files.get("main.wat"), "files.get(\"main.wat\")"), /\(func \$build\/target\/run/);
+  assert.match(required(files.get("runtime.wat"), "files.get(\"runtime.wat\")"), /\$~lib\/helper/);
+  assert.match(required(files.get("module.wat"), "files.get(\"module.wat\")"), /\(data/);
+  assert.equal(required(layout.modules[2], "layout.modules[2]").fields, 0);
+  assert.equal(layout.prefix + layout.order.map(([file, offset, length]) => required(files.get(file), "files.get(file)").slice(offset, offset + length)).join("") + layout.suffix, source);
 });
 test("rejects unknown ownership, unsafe paths and malformed modules", () => {
   assert.throws(() => modularWat(source, modules.slice(1)), /Unknown compiler symbol owner/);
-  assert.throws(() => modularWat(source, [{...modules[0]!, file: "../escape.wat"}]), /Unsafe WAT module path/);
+  assert.throws(() => modularWat(source, [{...required(modules[0], "modules[0]"), file: "../escape.wat"}]), /Unsafe WAT module path/);
   assert.throws(() => modularWat("(module (func", modules), /Unterminated/);
 });

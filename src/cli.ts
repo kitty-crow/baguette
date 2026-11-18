@@ -1,3 +1,5 @@
+import type { HostProcess } from "./contracts.ts";
+import { required } from "./required.ts";
 /**
  * Baguette 0.2.6
  *
@@ -10,14 +12,7 @@
  */
 
 export {};
-interface WrapperProcess {
-  argv: string[];
-  cwd(): string;
-  env: Record<string, string | undefined>;
-  execPath: string;
-  exit(code?: number): never;
-}
-const processHost = (globalThis as unknown as { process: WrapperProcess }).process;
+const processHost = (globalThis as unknown as { process: HostProcess }).process;
 const argv = new Set(processHost.argv.slice(2));
 const testCli = argv.has("--test-cli");
 const testWeb = argv.has("--test-web");
@@ -33,7 +28,7 @@ const fs = await import("node:fs/promises" as string) as unknown as { access(pat
 const run = (command: string[], label: string): void => {
   const exitCode = nativeBun
     ? nativeBun.spawnSync(command, { cwd: processHost.cwd(), env: processHost.env, stdout: "inherit", stderr: "inherit" }).exitCode
-    : (childProcess.spawnSync(command[0]!, command.slice(1), { cwd: processHost.cwd(), env: processHost.env, stdio: "inherit" }).status ?? 1);
+    : (childProcess.spawnSync(required(command[0], "command[0]"), command.slice(1), { cwd: processHost.cwd(), env: processHost.env, stdio: "inherit" }).status ?? 1);
   if (exitCode !== 0) throw new Error(`${label} failed with exit code ${exitCode}`);
 };
 const exists = async (path: string): Promise<boolean> => {
@@ -61,10 +56,8 @@ const webBuildExists = await exists("dist/web/index.html");
 const webPreparerExists = await exists("build/tool/teto-web.js");
 if (!alternateConfig && webBuildExists && webPreparerExists) {
   run(["node", "build/tool/teto-web.js"], "Teto web preparation");
-} else if (alternateConfig) {
-  console.log("Baguette: alternate compiler configuration completed");
 } else {
-  console.log("Baguette: Teto generated; run --test-web to build and prepare the static browser test");
+  console.log(alternateConfig ? "Baguette: alternate compiler configuration completed" : "Baguette: Teto generated; run --test-web to build and prepare the static browser test");
 }
 
 if (testCli) {
