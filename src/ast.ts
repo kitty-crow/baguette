@@ -96,6 +96,18 @@ export interface NativeCallableParts {
   readonly question: boolean;
   readonly generator: boolean;
 }
+function functionTemplate(text: string): ts.FunctionDeclaration {
+  const node = statement(text);
+  if (!ts.isFunctionDeclaration(node)) throw new Error("Invalid function template");
+  return node;
+}
+function expressionTemplate(text: string): ts.FunctionExpression {
+  const node = statement(text);
+  if (!ts.isVariableStatement(node)) throw new Error("Invalid expression template");
+  const value = required(node.declarationList.declarations[0] ?? null, "function expression").initializer ?? null;
+  if (!value || !ts.isFunctionExpression(value)) throw new Error("Invalid function expression");
+  return value;
+}
 function callableTemplate(parts: NativeCallableParts): Callable {
   // A parsed grammar template preserves genuine absence of annotation, name and body.
   const name = parts.name ? "slot" : "";
@@ -105,18 +117,8 @@ function callableTemplate(parts: NativeCallableParts): Callable {
   const body = parts.body ? " {}" : ";";
   const star = parts.generator ? "*" : "";
   const prefix = parts.modifiers.length ? "export " : "";
-  if (parts.form === "function") {
-    const node = statement(prefix + "function" + star + " " + signature + body);
-    if (ts.isFunctionDeclaration(node)) return node;
-    throw new Error("Invalid function template");
-  }
-  if (parts.form === "expression") {
-    const node = statement("const fn = " + (parts.modifiers.length ? "async " : "") + "function" + star + " " + signature + " {};");
-    if (!ts.isVariableStatement(node)) throw new Error("Invalid expression template");
-    const value = required(node.declarationList.declarations[0] ?? null, "function expression").initializer ?? null;
-    if (value && ts.isFunctionExpression(value)) return value;
-    throw new Error("Invalid function expression");
-  }
+  if (parts.form === "function") return functionTemplate(prefix + "function" + star + " " + signature + body);
+  if (parts.form === "expression") return expressionTemplate("const fn = " + (parts.modifiers.length ? "async " : "") + "function" + star + " " + signature + " {};");
   const member = classMember((parts.modifiers.length ? "public " : "") + (parts.form === "getter" ? "get " : star) + signature + body);
   if (ts.isMethodDeclaration(member) || ts.isGetAccessorDeclaration(member)) return member;
   throw new Error("Invalid callable member");

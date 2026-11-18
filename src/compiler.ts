@@ -1582,7 +1582,7 @@ const lowerSource = (entry: SourceEntry): string => {
     };
     const flattenedName = (name: ts.Identifier): string | null => {
       const symbol = symbolOf(name);
-      return symbol ? abiSymbols.get(symbol) ?? renamedSymbols.get(symbol) ?? null : null;
+      return symbol ? abiSymbols.get(symbol) ?? (renamedSymbols.get(symbol) ?? null) : null;
     };
     visit = node => {
       if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) return [];
@@ -1710,7 +1710,8 @@ const allowedImportKeys = new Set(allowedHostImports.map(importKey));
 const instantiateImports = (threaded: boolean): WebAssembly.Imports => {
   const imports: Record<string, Record<string, WebAssembly.ImportValue>> = {};
   for (const item of allowedHostImports) {
-    const namespace = imports[item.module] ?? (imports[item.module] = {});
+    const namespace: Record<string, WebAssembly.ImportValue> = imports[item.module] ?? {};
+    imports[item.module] = namespace;
     if (item.kind === "memory") {
       namespace[item.name] = new WebAssembly.Memory({
         initial: Math.max(1024, config.memory.initialPages ?? 1024),
