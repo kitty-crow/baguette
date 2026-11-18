@@ -497,6 +497,7 @@ const promiseType = (type: ts.Type, location: ts.Node, depth: number): ts.TypeNo
   const innerNode = nativeTypeNode(inner, location, depth + 1);
   return innerNode ? ts.factory.createTypeReferenceNode("__BqTask", [innerNode]) : null;
 };
+// Materialise only representations supported by AssemblyScript; unsupported or recursive types fail closed.
 const nativeTypeNode = (type: ts.Type, location: ts.Node, depth = 0): ts.TypeNode | null => {
   if (depth > 16) return null;
   const aliasName = (type.aliasSymbol ?? null) ? required(type.aliasSymbol ?? null, "type alias").getName() : null;
@@ -665,27 +666,29 @@ interface AsyncUnit {
   readonly declaration: ts.FunctionDeclaration | ts.ArrowFunction | ts.FunctionExpression | ts.MethodDeclaration;
   readonly body: ts.Block;
   readonly parameters: readonly ts.ParameterDeclaration[];
-  readonly typeParameters: readonly ts.TypeParameterDeclaration[] | undefined;
-  readonly frameTypeParameters: readonly ts.TypeParameterDeclaration[] | undefined;
-  readonly modifiers: readonly ts.ModifierLike[] | undefined;
+  readonly typeParameters: readonly ts.TypeParameterDeclaration[];
+  readonly frameTypeParameters: readonly ts.TypeParameterDeclaration[];
+  readonly modifiers: readonly ts.ModifierLike[];
   readonly symbol: ts.Symbol;
-  readonly receiverType?: ts.TypeNode | undefined;
-  readonly method?: ts.MethodDeclaration;
+  readonly receiverType: ts.TypeNode | null;
+  readonly method: ts.MethodDeclaration | null;
 }
 const asyncFunctionDeclarations: AsyncUnit[] = [];
 for (const entry of sourceEntries) {
   if (intrinsicModules.has(entry.absolutePath)) continue;
   const collectFunction = (node: ts.FunctionDeclaration, name: ts.Identifier, body: ts.Block): void => {
     const symbol = symbolOf(name);
-    if (symbol) asyncFunctionDeclarations.push({ name, declaration: node, body, parameters: node.parameters, typeParameters: node.typeParameters, frameTypeParameters: node.typeParameters, modifiers: node.modifiers, symbol });
+    if (symbol) asyncFunctionDeclarations.push({ name, declaration: node, body, parameters: node.parameters, typeParameters: node.typeParameters ?? [], frameTypeParameters: node.typeParameters ?? [], modifiers: node.modifiers ?? [], symbol, receiverType: null, method: null });
   };
   const collectMethod = (node: ts.MethodDeclaration, name: ts.Identifier, body: ts.Block): void => {
-    if (!ts.isClassDeclaration(node.parent) || !node.parent.name) return;
-    const isStatic = Boolean(ts.getModifiers(node)?.some(item => item.kind === ts.SyntaxKind.StaticKeyword));
+    if (!ts.isClassDeclaration(node.parent)) return;
+    const parentName = node.parent.name ?? null;
+    if (!parentName) return;
+    const isStatic = Boolean((ts.getModifiers(node) ?? []).some(item => item.kind === ts.SyntaxKind.StaticKeyword));
     const symbol = symbolOf(name);
-    const classSymbol = symbolOf(node.parent.name);
+    const classSymbol = symbolOf(parentName);
     if (!symbol || !classSymbol) return;
-      const className = abiSymbols.get(classSymbol) ?? renamedSymbols.get(classSymbol) ?? node.parent.name.text;
+      const className = abiSymbols.get(classSymbol) ?? (renamedSymbols.get(classSymbol) ?? parentName.text);
       const classTypeParameters = node.parent.typeParameters ?? [];
       const classTypeArguments = classTypeParameters.map(parameter => ts.factory.createTypeReferenceNode(parameter.name.text));
       const frameTypeParameters = isStatic ? [...(node.typeParameters ?? [])] : [...classTypeParameters, ...(node.typeParameters ?? [])];
@@ -694,39 +697,47 @@ for (const entry of sourceEntries) {
         declaration: node,
         body,
         parameters: node.parameters,
-        typeParameters: node.typeParameters,
-        frameTypeParameters: frameTypeParameters.length ? frameTypeParameters : undefined,
-        modifiers: node.modifiers,
+        typeParameters: node.typeParameters ?? [],
+        frameTypeParameters,
+        modifiers: node.modifiers ?? [],
         symbol,
-        receiverType: isStatic ? undefined : ts.factory.createTypeReferenceNode(className, classTypeArguments.length ? classTypeArguments : undefined),
+        receiverType: isStatic ? null : ts.factory.createTypeReferenceNode(className, classTypeArguments),
         method: node,
       });
   };
+  const collectAsync = (node: ts.Node, name: ts.Identifier, body: ts.Block): void => {
+    if (ts.isFunctionDeclaration(node)) collectFunction(node, name, body);
+    if (ts.isMethodDeclaration(node)) collectMethod(node, name, body);
+  };
   const collect = (node: ts.Node): void => {
-    if (ts.isFunctionDeclaration(node) && node.name && node.body && functionHasAsyncModifier(node)) collectFunction(node, node.name, node.body);
-    if (ts.isMethodDeclaration(node) && node.body && ts.isIdentifier(node.name) && functionHasAsyncModifier(node)) collectMethod(node, node.name, node.body);
+    const body = ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node) ? node.body ?? null : null;
+    const name = ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node) ? node.name ?? null : null;
+    if (body && name && ts.isIdentifier(name) && functionHasAsyncModifier(node)) collectAsync(node, name, body);
     ts.forEachChild(node, collect);
   };
   collect(entry.source);
   for (const statement of entry.source.statements) {
     if (!ts.isVariableStatement(statement) || statement.declarationList.declarations.length !== 1) continue;
-    const variable = required(statement.declarationList.declarations[0], "statement.declarationList.declarations[0]");
-    if (!ts.isIdentifier(variable.name) || !variable.initializer
-      || !(ts.isArrowFunction(variable.initializer) || ts.isFunctionExpression(variable.initializer))
-      || !functionHasAsyncModifier(variable.initializer)) continue;
+    const variable = required(statement.declarationList.declarations[0] ?? null, "statement.declarationList.declarations[0]");
+    const initializer = variable.initializer ?? null;
+    if (!ts.isIdentifier(variable.name) || !initializer
+      || !(ts.isArrowFunction(initializer) || ts.isFunctionExpression(initializer))
+      || !functionHasAsyncModifier(initializer)) continue;
     const symbol = symbolOf(variable.name);
     if (!symbol) continue;
-    const body = ts.isBlock(variable.initializer.body)
-      ? variable.initializer.body
-      : ts.factory.createBlock([ts.factory.createReturnStatement(variable.initializer.body)], true);
+    const body = ts.isBlock(initializer.body)
+      ? initializer.body
+      : ts.factory.createBlock([ts.factory.createReturnStatement(initializer.body)], true);
     asyncFunctionDeclarations.push({
       name: variable.name,
-      declaration: variable.initializer,
+      declaration: initializer,
       body,
-      parameters: variable.initializer.parameters,
-      typeParameters: variable.initializer.typeParameters,
-      frameTypeParameters: variable.initializer.typeParameters,
-      modifiers: statement.modifiers,
+      parameters: initializer.parameters,
+      typeParameters: initializer.typeParameters ?? [],
+      frameTypeParameters: initializer.typeParameters ?? [],
+      modifiers: statement.modifiers ?? [],
+      receiverType: null,
+      method: null,
       symbol,
     });
   }
@@ -782,7 +793,7 @@ class __BqTaskVoid {
 
 const finalNameOf = (name: ts.Identifier): string => {
   const symbol = symbolOf(name);
-  return symbol && (abiSymbols.get(symbol) ?? renamedSymbols.get(symbol)) || name.text;
+  return symbol ? abiSymbols.get(symbol) ?? (renamedSymbols.get(symbol) ?? name.text) : name.text;
 };
 const asyncHelpers = new Map<ts.Symbol, { frameName: string }>();
 for (const unit of asyncFunctionDeclarations) {
@@ -790,25 +801,27 @@ for (const unit of asyncFunctionDeclarations) {
   const stem = `${safeName(finalNameOf(unit.name))}_${shortHash(`${relative(unit.declaration.getSourceFile().fileName)}:${unit.declaration.getStart()}`)}`;
   asyncHelpers.set(symbol, { frameName: `__BqFrame_${stem}` });
 }
-const withoutAsyncModifier = (modifiers: readonly ts.ModifierLike[] | undefined, keepExport: boolean): readonly ts.Modifier[] | undefined => {
-  const kept = modifiers?.filter((modifier): modifier is ts.Modifier => ts.isModifier(modifier)
+const withoutAsyncModifier = (modifiers: readonly ts.ModifierLike[], keepExport: boolean): readonly ts.Modifier[] => {
+  const kept = modifiers.filter((modifier): modifier is ts.Modifier => ts.isModifier(modifier)
     && modifier.kind !== ts.SyntaxKind.AsyncKeyword
     && modifier.kind !== ts.SyntaxKind.DefaultKeyword
     && (keepExport || modifier.kind !== ts.SyntaxKind.ExportKeyword));
-  return kept?.length ? kept : undefined;
+  return kept;
 };
 const promisedResultType = (node: ts.FunctionDeclaration | ts.ArrowFunction | ts.FunctionExpression | ts.MethodDeclaration): { source: ts.Type; native: ts.TypeNode; isVoid: boolean } => {
-  const signature = checker.getSignatureFromDeclaration(node);
+  const signature = checker.getSignatureFromDeclaration(node) ?? null;
   if (!signature) throw new Error(`${lineAndColumn(node.getSourceFile(), node.getStart())}: BQ2004: cannot resolve async function signature`);
-  if (node.type && ts.isTypeReferenceNode(node.type) && ts.isIdentifier(node.type.typeName)
-    && node.type.typeName.text === "Promise" && node.type.typeArguments?.length === 1) {
-    const innerNode = required(node.type.typeArguments[0], "node.type.typeArguments[0]");
+  const declared = node.type ?? null;
+  const arguments_ = declared && ts.isTypeReferenceNode(declared) ? declared.typeArguments ?? [] : [];
+  if (declared && ts.isTypeReferenceNode(declared) && ts.isIdentifier(declared.typeName)
+    && declared.typeName.text === "Promise" && arguments_.length === 1) {
+    const innerNode = required(arguments_[0] ?? null, "promise result type");
     const sourceType = checker.getTypeFromTypeNode(innerNode);
     const isVoid = innerNode.kind === ts.SyntaxKind.VoidKeyword || Boolean(sourceType.flags & (ts.TypeFlags.Void | ts.TypeFlags.Undefined));
     const native = isVoid ? ts.factory.createKeywordTypeNode(ts.SyntaxKind.VoidKeyword) : assemblyType(innerNode);
     return { source: sourceType, native, isVoid };
   }
-  const promised = checker.getAwaitedType(signature.getReturnType());
+  const promised = checker.getAwaitedType(signature.getReturnType()) ?? null;
   if (!promised) throw new Error(`${lineAndColumn(node.getSourceFile(), node.getStart())}: BQ2004: async function must return Promise<T>`);
   const isVoid = Boolean(promised.flags & (ts.TypeFlags.Void | ts.TypeFlags.Undefined));
   const native = isVoid ? ts.factory.createKeywordTypeNode(ts.SyntaxKind.VoidKeyword) : nativeTypeNode(promised, node);
@@ -833,14 +846,14 @@ interface AsyncFrameBinding {
   readonly symbol: ts.Symbol;
   readonly field: string;
   readonly type: ts.TypeNode;
-  readonly parameter?: ts.ParameterDeclaration | undefined;
+  readonly parameter: ts.ParameterDeclaration | null;
 }
 type AsyncAwaitKind = "variable" | "assignment" | "expression" | "return" | "capture";
 interface AsyncAwaitPoint {
   readonly await: ts.AwaitExpression;
   readonly kind: AsyncAwaitKind;
-  readonly target?: ts.Expression | ts.Identifier | undefined;
-  readonly captureField?: string;
+  readonly target: ts.Expression | null;
+  readonly captureField: string | null;
   readonly resultType: ts.TypeNode;
   readonly resultVoid: boolean;
   readonly field: string;
@@ -851,12 +864,12 @@ const lowerSource = (entry: SourceEntry): string => {
   const source = entry.source;
   const transformer: ts.TransformerFactory<ts.SourceFile> = context => {
     const asyncSupportStatements: ts.Statement[] = [];
-    let visit: ts.Visitor;
+    let visit: ts.Visitor<ts.Node, ts.Node>;
     const lowerAsyncFunction = (unit: AsyncUnit): { readonly support: readonly ts.Statement[]; readonly wrapper: ts.FunctionDeclaration | ts.MethodDeclaration } => {
       const node = unit.declaration;
       const body = unit.body;
       for (const parameter of unit.parameters) {
-        if (!ts.isIdentifier(parameter.name) || parameter.dotDotDotToken) {
+        if (!ts.isIdentifier(parameter.name) || (parameter.dotDotDotToken ?? null)) {
           throw new Error(`${lineAndColumn(source, parameter.getStart(source))}: BQ2007: async coroutine parameters must currently be fixed named parameters`);
         }
       }
@@ -864,15 +877,15 @@ const lowerSource = (entry: SourceEntry): string => {
       const result = promisedResultType(node);
       const taskType = taskTypeFor(result);
       const functionSymbol = unit.symbol;
-      const helper = asyncHelpers.get(functionSymbol);
+      const helper = asyncHelpers.get(functionSymbol) ?? null;
       if (!helper) throw new Error(`${lineAndColumn(source, node.getStart(source))}: BQ2013: missing coroutine helper identity`);
       const { frameName } = helper;
-      const frameTypeArguments = unit.frameTypeParameters?.map(parameter => ts.factory.createTypeReferenceNode(parameter.name.text));
+      const frameTypeArguments = unit.frameTypeParameters.map(parameter => ts.factory.createTypeReferenceNode(parameter.name.text));
       const frameTypeReference = ts.factory.createTypeReferenceNode(frameName, frameTypeArguments);
       const frameBindings = new Map<ts.Symbol, AsyncFrameBinding>();
       const bindings: AsyncFrameBinding[] = [];
       let bindingIndex = 0;
-      const addBinding = (name: ts.Identifier, type: ts.TypeNode | undefined, parameter?: ts.ParameterDeclaration): AsyncFrameBinding => {
+      const addBinding = (name: ts.Identifier, type: ts.TypeNode | null, parameter: ts.ParameterDeclaration | null = null): AsyncFrameBinding => {
         const symbol = symbolOf(name);
         if (!symbol) throw new Error(`${lineAndColumn(source, name.getStart(source))}: BQ2008: cannot resolve coroutine-frame binding ${name.text}`);
         const native = type ? assemblyType(type) : inferredTypeFor(name);
@@ -885,8 +898,8 @@ const lowerSource = (entry: SourceEntry): string => {
         bindings.push(binding);
         return binding;
       };
-      for (const parameter of unit.parameters) addBinding(parameter.name as ts.Identifier, parameter.type, parameter);
-      const registerFrameName = (name: ts.Identifier, type?: ts.TypeNode): void => {
+      for (const parameter of unit.parameters) addBinding(parameter.name as ts.Identifier, parameter.type ?? null, parameter);
+      const registerFrameName = (name: ts.Identifier, type: ts.TypeNode | null = null): void => {
         const symbol = symbolOf(name);
         if (symbol && !frameBindings.has(symbol)) addBinding(name, type);
       };
@@ -899,7 +912,7 @@ const lowerSource = (entry: SourceEntry): string => {
       };
       const collectFrameBindings = (current: ts.Node): void => {
         if (ts.isFunctionLike(current) && current !== node) return;
-        if (ts.isVariableDeclaration(current) && ts.isIdentifier(current.name)) registerFrameName(current.name, current.type);
+        if (ts.isVariableDeclaration(current) && ts.isIdentifier(current.name)) registerFrameName(current.name, current.type ?? null);
         if (ts.isVariableDeclaration(current) && !ts.isIdentifier(current.name)) collectBindingIdentifiers(current.name);
         ts.forEachChild(current, collectFrameBindings);
       };
@@ -922,26 +935,28 @@ const lowerSource = (entry: SourceEntry): string => {
       interface AwaitSyntax {
         readonly awaitExpression: ts.AwaitExpression;
         readonly kind: AsyncAwaitKind;
-        readonly target?: ts.Expression | ts.Identifier | undefined;
+        readonly target: ts.Expression | null;
       }
+      const isAwaitInitializer = (value: ts.Expression | null): boolean => value !== null && ts.isAwaitExpression(value);
       const variableAwaitSyntax = (statement: ts.VariableStatement): AwaitSyntax | null => {
-        const awaitedDeclarations = statement.declarationList.declarations.filter(item => Boolean(item.initializer && ts.isAwaitExpression(item.initializer)));
+        const awaitedDeclarations = statement.declarationList.declarations.filter(item => isAwaitInitializer(item.initializer ?? null));
         if (!awaitedDeclarations.length) return null;
         if (statement.declarationList.declarations.length !== 1 || awaitedDeclarations.length !== 1) {
           throw new Error(`${lineAndColumn(source, statement.getStart(source))}: BQ2014: an awaited variable declaration must be the only declaration in its statement`);
         }
-        const declaration = required(awaitedDeclarations[0], "awaitedDeclarations[0]");
-        if (!ts.isIdentifier(declaration.name) || !declaration.initializer || !ts.isAwaitExpression(declaration.initializer)) return null;
-        return { awaitExpression: declaration.initializer, kind: "variable", target: declaration.name };
+        const declaration = required(awaitedDeclarations[0] ?? null, "awaitedDeclarations[0]");
+        const initializer = declaration.initializer ?? null;
+        if (!ts.isIdentifier(declaration.name) || !initializer || !ts.isAwaitExpression(initializer)) return null;
+        return { awaitExpression: initializer, kind: "variable", target: declaration.name };
       };
       const awaitSyntax = (statement: ts.Statement): AwaitSyntax | null => {
-        if (ts.isExpressionStatement(statement) && ts.isAwaitExpression(statement.expression)) return { awaitExpression: statement.expression, kind: "expression" };
+        if (ts.isExpressionStatement(statement) && ts.isAwaitExpression(statement.expression)) return { awaitExpression: statement.expression, kind: "expression", target: null };
         if (ts.isExpressionStatement(statement) && ts.isBinaryExpression(statement.expression)
           && statement.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isAwaitExpression(statement.expression.right))
           return { awaitExpression: statement.expression.right, kind: "assignment", target: statement.expression.left };
         if (ts.isVariableStatement(statement)) return variableAwaitSyntax(statement);
-        if (ts.isReturnStatement(statement) && statement.expression && ts.isAwaitExpression(statement.expression))
-          return { awaitExpression: statement.expression, kind: "return" };
+        const value = ts.isReturnStatement(statement) ? statement.expression ?? null : null;
+        if (value && ts.isAwaitExpression(value)) return { awaitExpression: value, kind: "return", target: null };
         return null;
       };
       const classifyAwait = (statement: ts.Statement): AsyncAwaitPoint | null => {
@@ -953,6 +968,7 @@ const lowerSource = (entry: SourceEntry): string => {
           await: awaitExpression,
           kind,
           target,
+          captureField: null,
           resultType: awaited.native,
           resultVoid: awaited.isVoid,
           field: `__bq_await_${awaitIndex++}`,
@@ -970,12 +986,13 @@ const lowerSource = (entry: SourceEntry): string => {
 
       const sequenceAlwaysReturns = (statements: readonly ts.Statement[]): boolean => {
         if (!statements.length) return false;
-        return statementAlwaysReturns(required(statements[statements.length - 1], "statements[statements.length - 1]"));
+        return statementAlwaysReturns(required(statements[statements.length - 1] ?? null, "statements[statements.length - 1]"));
       };
       const statementAlwaysReturns = (statement: ts.Statement): boolean => {
         if (ts.isReturnStatement(statement)) return true;
         if (ts.isBlock(statement)) return sequenceAlwaysReturns(statement.statements);
-        if (ts.isIfStatement(statement) && statement.elseStatement) return statementAlwaysReturns(statement.thenStatement) && statementAlwaysReturns(statement.elseStatement);
+        const alternative = ts.isIfStatement(statement) ? statement.elseStatement ?? null : null;
+        if (alternative && ts.isIfStatement(statement)) return statementAlwaysReturns(statement.thenStatement) && statementAlwaysReturns(alternative);
         if (ts.isSwitchStatement(statement)) {
           const hasDefault = statement.caseBlock.clauses.some(ts.isDefaultClause);
           return hasDefault && statement.caseBlock.clauses.every(clause => sequenceAlwaysReturns(clause.statements));
@@ -991,7 +1008,7 @@ const lowerSource = (entry: SourceEntry): string => {
       const taskAccess = (): ts.PropertyAccessExpression => ts.factory.createPropertyAccessExpression(frameIdentifier, "__bq_task");
       const bindingAccess = (binding: AsyncFrameBinding): ts.PropertyAccessExpression => ts.factory.createPropertyAccessExpression(frameIdentifier, binding.field);
       const receiverAccess = (): ts.PropertyAccessExpression => ts.factory.createPropertyAccessExpression(frameIdentifier, "__bq_this");
-      const frameReferenceVisitor: ts.Visitor = current => {
+      const frameReferenceVisitor: ts.Visitor<ts.Node, ts.Node> = current => {
         if (ts.isFunctionLike(current)) return current;
         if (unit.receiverType && current.kind === ts.SyntaxKind.ThisKeyword) return receiverAccess();
         if (current.kind === ts.SyntaxKind.SuperKeyword) {
@@ -1001,14 +1018,14 @@ const lowerSource = (entry: SourceEntry): string => {
           throw new Error(`${lineAndColumn(source, current.getStart(source))}: BQ2034: ECMAScript private fields cannot be accessed from a native coroutine resume function\n  hint: Use a TypeScript private/protected field or explicit accessor method.`);
         }
         const symbol = ts.isShorthandPropertyAssignment(current) ? symbolOf(current.name) : ts.isIdentifier(current) ? symbolOf(current) : null;
-        const binding = symbol && frameBindings.get(symbol);
+        const binding = symbol ? frameBindings.get(symbol) ?? null : null;
         if (binding && ts.isShorthandPropertyAssignment(current)) return ts.factory.createPropertyAssignment(current.name.text, bindingAccess(binding));
         if (binding && ts.isIdentifier(current)) return bindingAccess(binding);
         return ts.visitEachChild(current, frameReferenceVisitor, context);
       };
       const rewrite = <T extends ts.Node>(current: T): T => {
-        const framed = ts.visitNode(current, frameReferenceVisitor) as T;
-        return ts.visitNode(framed, visit) as T;
+        const framed = required(ts.visitNode(current, frameReferenceVisitor) ?? null, "framed node") as T;
+        return required(ts.visitNode(framed, visit) ?? null, "rewritten node") as T;
       };
       const firstAwaitIn = (root: ts.Node): ts.AwaitExpression | null => {
         let found: ts.AwaitExpression | null = null;
@@ -1022,8 +1039,8 @@ const lowerSource = (entry: SourceEntry): string => {
         return found;
       };
       const replaceNode = <T extends ts.Node>(root: T, target: ts.Node, replacement: ts.Expression): T => {
-        const replacer: ts.Visitor = current => current === target ? replacement : ts.visitEachChild(current, replacer, context);
-        return ts.visitNode(root, replacer) as T;
+        const replacer: ts.Visitor<ts.Node, ts.Node> = current => current === target ? replacement : ts.visitEachChild(current, replacer, context);
+        return required(ts.visitNode(root, replacer) ?? null, "replacement node") as T;
       };
       const literalOrStaticReference = (expression: ts.Expression): boolean => {
         while (ts.isParenthesizedExpression(expression) || ts.isNonNullExpression(expression) || ts.isAsExpression(expression) || ts.isTypeAssertionExpression(expression)) expression = expression.expression;
@@ -1064,8 +1081,8 @@ const lowerSource = (entry: SourceEntry): string => {
         };
         if (!findPath(root)) throw new Error(`${lineAndColumn(source, awaitExpression.getStart(source))}: BQ2020: internal coroutine expression path could not be resolved`);
         for (let index = 0; index + 1 < ancestry.length; index++) {
-          const current = required(ancestry[index], "ancestry[index]");
-          const parent = required(ancestry[index + 1], "ancestry[index + 1]");
+          const current = required(ancestry[index] ?? null, "ancestry[index]");
+          const parent = required(ancestry[index + 1] ?? null, "ancestry[index + 1]");
           if (ts.isBinaryExpression(parent)) verifyBinaryAwait(parent, current, awaitExpression);
           if (ts.isCallExpression(parent) || ts.isNewExpression(parent)) verifyCallAwait(parent, current, awaitExpression);
           if (ts.isConditionalExpression(parent) && current !== parent.condition) {
@@ -1076,19 +1093,19 @@ const lowerSource = (entry: SourceEntry): string => {
       const resolveAndReturn = (expression: ts.Expression | null = null): ts.Block => {
         const args = expression ? [rewrite(expression)] : [];
         return ts.factory.createBlock([
-          ts.factory.createExpressionStatement(ts.factory.createCallExpression(ts.factory.createPropertyAccessExpression(taskAccess(), "__bq_resolve"), undefined, args)),
+          ts.factory.createExpressionStatement(ts.factory.createCallExpression(ts.factory.createPropertyAccessExpression(taskAccess(), "__bq_resolve"), [], args)),
           ts.factory.createReturnStatement(),
         ], true);
       };
-      const rewriteReturnsVisitor: ts.Visitor = current => {
+      const rewriteReturnsVisitor: ts.Visitor<ts.Node, ts.Node> = current => {
         if (ts.isFunctionLike(current)) return current;
-        if (ts.isReturnStatement(current) && !result.isVoid && !current.expression) throw new Error(`${lineAndColumn(source, current.getStart(source))}: BQ2011: non-void async return requires a value`);
+        if (ts.isReturnStatement(current) && !result.isVoid && !(current.expression ?? null)) throw new Error(`${lineAndColumn(source, current.getStart(source))}: BQ2011: non-void async return requires a value`);
         if (ts.isReturnStatement(current)) return resolveAndReturn(current.expression ?? null);
         return ts.visitEachChild(current, rewriteReturnsVisitor, context);
       };
       const requiredFrameBinding = (name: ts.Identifier, description: string): AsyncFrameBinding => {
         const symbol = symbolOf(name);
-        const binding = symbol && frameBindings.get(symbol);
+        const binding = symbol ? frameBindings.get(symbol) ?? null : null;
         if (!binding) throw new Error(`${lineAndColumn(source, name.getStart(source))}: BQ2012: cannot find ${description} ${name.text}`);
         return binding;
       };
@@ -1103,7 +1120,7 @@ const lowerSource = (entry: SourceEntry): string => {
           if (ts.isArrayBindingPattern(name)) {
             name.elements.forEach((element, index) => {
               if (ts.isOmittedExpression(element)) return;
-              if (element.dotDotDotToken || element.initializer) {
+              if ((element.dotDotDotToken ?? null) || (element.initializer ?? null)) {
                 throw new Error(`${lineAndColumn(source, element.getStart(source))}: BQ2021: destructuring defaults and rest bindings need dedicated native lowering\n  hint: Split this binding into explicit indexed assignments.`);
               }
               lowerBindingAssignment(element.name, ts.factory.createElementAccessExpression(value, ts.factory.createNumericLiteral(index)));
@@ -1111,7 +1128,7 @@ const lowerSource = (entry: SourceEntry): string => {
             return;
           }
           for (const element of name.elements) {
-            if (element.dotDotDotToken || element.initializer) {
+            if ((element.dotDotDotToken ?? null) || (element.initializer ?? null)) {
               throw new Error(`${lineAndColumn(source, element.getStart(source))}: BQ2021: destructuring defaults and rest bindings need dedicated native lowering\n  hint: Split this binding into explicit property assignments.`);
             }
             const property = element.propertyName ?? (ts.isIdentifier(element.name) ? element.name : null);
@@ -1125,14 +1142,15 @@ const lowerSource = (entry: SourceEntry): string => {
           }
         };
         for (const declaration of statement.declarationList.declarations) {
-          if (!declaration.initializer) continue;
+          const initializer = declaration.initializer ?? null;
+          if (!initializer) continue;
           if (ts.isIdentifier(declaration.name)) {
-            lowerBindingAssignment(declaration.name, rewrite(declaration.initializer));
+            lowerBindingAssignment(declaration.name, rewrite(initializer));
             continue;
           }
-          const rewrittenInitializer = rewrite(declaration.initializer);
-          const initializerType = declaration.initializer.pos >= 0
-            ? nativeTypeNode(checker.getTypeAtLocation(declaration.initializer), declaration.initializer)
+          const rewrittenInitializer = rewrite(initializer);
+          const initializerType = initializer.pos >= 0
+            ? nativeTypeNode(checker.getTypeAtLocation(initializer), initializer)
             : null;
           if (!initializerType && literalOrStaticReference(rewrittenInitializer)) {
             lowerBindingAssignment(declaration.name, rewrittenInitializer);
@@ -1152,13 +1170,13 @@ const lowerSource = (entry: SourceEntry): string => {
       };
       const lowerOrdinaryStatement = (statement: ts.Statement): readonly ts.Statement[] => {
         if (ts.isVariableStatement(statement)) return lowerVariables(statement);
-        const returnsLowered = ts.visitNode(statement, rewriteReturnsVisitor) as ts.Statement;
+        const returnsLowered = ts.visitNode(statement, rewriteReturnsVisitor, ts.isStatement);
         return [rewrite(returnsLowered)];
       };
 
       const awaitTaskAccess = (point: AsyncAwaitPoint): ts.PropertyAccessExpression => ts.factory.createPropertyAccessExpression(frameIdentifier, point.field);
       const consumeAwait = (point: AsyncAwaitPoint): ts.Statement[] => {
-        const resumed = ts.factory.createCallExpression(ts.factory.createPropertyAccessExpression(awaitTaskAccess(point), "__bq_resume"), undefined, []);
+        const resumed = ts.factory.createCallExpression(ts.factory.createPropertyAccessExpression(awaitTaskAccess(point), "__bq_resume"), [], []);
         if (point.kind === "expression") return [ts.factory.createExpressionStatement(resumed)];
         if (point.kind === "return") return [resolveAndReturn(point.resultVoid ? null : resumed)];
         if (point.kind === "variable" && point.target && ts.isIdentifier(point.target)) {
@@ -1186,7 +1204,7 @@ const lowerSource = (entry: SourceEntry): string => {
         ts.factory.createContinueStatement(),
       ];
       const completionState = allocateState(result.isVoid ? [...resolveAndReturn().statements] : [ts.factory.createReturnStatement()]);
-      interface LoopTargets { readonly breakState: number; readonly continueState?: number; }
+      interface LoopTargets { readonly breakState: number; readonly continueState: number | null; }
 
       const compileAwait = (point: AsyncAwaitPoint, next: number): number => {
         const resumeBody = consumeAwait(point);
@@ -1195,9 +1213,9 @@ const lowerSource = (entry: SourceEntry): string => {
         const taskExpression = rewrite(point.await.expression);
         const setTask = ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(awaitTaskAccess(point), ts.SyntaxKind.EqualsToken, taskExpression));
         const setResumeState = ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(ts.factory.createPropertyAccessExpression(frameIdentifier, "__bq_state"), ts.SyntaxKind.EqualsToken, ts.factory.createNumericLiteral(resumeState)));
-        const suspend = ts.factory.createExpressionStatement(ts.factory.createCallExpression(ts.factory.createPropertyAccessExpression(awaitTaskAccess(point), "__bq_suspend"), undefined, [frameIdentifier]));
+        const suspend = ts.factory.createExpressionStatement(ts.factory.createCallExpression(ts.factory.createPropertyAccessExpression(awaitTaskAccess(point), "__bq_suspend"), [], [frameIdentifier]));
         const notReady = ts.factory.createPrefixUnaryExpression(ts.SyntaxKind.ExclamationToken,
-          ts.factory.createCallExpression(ts.factory.createPropertyAccessExpression(awaitTaskAccess(point), "__bq_ready"), undefined, []));
+          ts.factory.createCallExpression(ts.factory.createPropertyAccessExpression(awaitTaskAccess(point), "__bq_ready"), [], []));
         return allocateState([
           setTask,
           setResumeState,
@@ -1206,7 +1224,7 @@ const lowerSource = (entry: SourceEntry): string => {
         ]);
       };
 
-      const compileNestedExpressionAwait = (statement: ts.Statement, next: number, loop?: LoopTargets): number | null => {
+      const compileNestedExpressionAwait = (statement: ts.Statement, next: number, loop: LoopTargets | null = null): number | null => {
         const awaitExpression = firstAwaitIn(statement);
         if (!awaitExpression) return null;
         assertAwaitEvaluationOrder(awaitExpression, statement);
@@ -1219,6 +1237,7 @@ const lowerSource = (entry: SourceEntry): string => {
         const point: AsyncAwaitPoint = {
           await: awaitExpression,
           kind: "capture",
+          target: null,
           captureField,
           resultType: awaited.native,
           resultVoid: false,
@@ -1251,6 +1270,7 @@ const lowerSource = (entry: SourceEntry): string => {
           const point: AsyncAwaitPoint = {
             await: awaitExpression,
             kind: "capture",
+          target: null,
             captureField,
             resultType: awaited.native,
             resultVoid: false,
@@ -1262,41 +1282,42 @@ const lowerSource = (entry: SourceEntry): string => {
           return compileAwait(point, remainderEntry);
       };
 
-      let compileStatement: (statement: ts.Statement, next: number, loop?: LoopTargets) => number;
-      const compileSequence = (statements: readonly ts.Statement[], next: number, loop?: LoopTargets): number => {
+      let compileStatement: (statement: ts.Statement, next: number, ...loop: [] | [LoopTargets | null]) => number;
+      const compileSequence = (statements: readonly ts.Statement[], next: number, loop: LoopTargets | null = null): number => {
         let entry = next;
-        for (let index = statements.length - 1; index >= 0; index--) entry = compileStatement(required(statements[index], "statements[index]"), entry, loop);
+        for (let index = statements.length - 1; index >= 0; index--) entry = compileStatement(required(statements[index] ?? null, "statements[index]"), entry, loop);
         return entry;
       };
       const compileFor = (statement: ts.ForStatement, next: number): number => {
         const conditionAnchor = allocateState();
         const bodyAnchor = allocateState();
         const incrementAnchor = allocateState();
-        const conditionEntry = statement.condition
-          ? compileConditionalExpression(statement.condition, bodyAnchor, next)
+        const condition = statement.condition ?? null;
+        const conditionEntry = condition
+          ? compileConditionalExpression(condition, bodyAnchor, next)
           : allocateState(setStateAndContinue(bodyAnchor));
         stateBodies.set(conditionAnchor, setStateAndContinue(conditionEntry));
-        const incrementEntry = statement.incrementor
-          ? compileStatement(ts.factory.createExpressionStatement(statement.incrementor), conditionAnchor)
+        const incrementor = statement.incrementor ?? null;
+        const incrementEntry = incrementor
+          ? compileStatement(ts.factory.createExpressionStatement(incrementor), conditionAnchor)
           : conditionAnchor;
         stateBodies.set(incrementAnchor, setStateAndContinue(incrementEntry));
         const bodyEntry = compileStatement(statement.statement, incrementAnchor, { breakState: next, continueState: incrementAnchor });
         stateBodies.set(bodyAnchor, setStateAndContinue(bodyEntry));
-        if (!statement.initializer) return conditionAnchor;
-        if (ts.isVariableDeclarationList(statement.initializer)) {
-          return compileStatement(ts.factory.createVariableStatement(undefined, statement.initializer), conditionAnchor);
-        }
-        return compileStatement(ts.factory.createExpressionStatement(statement.initializer), conditionAnchor);
+        const initializer = statement.initializer ?? null;
+        if (!initializer) return conditionAnchor;
+        if (ts.isVariableDeclarationList(initializer)) return compileStatement(ts.factory.createVariableStatement([], initializer), conditionAnchor);
+        return compileStatement(ts.factory.createExpressionStatement(initializer), conditionAnchor);
       };
-      const compileBreak = (statement: ts.BreakStatement, loop?: LoopTargets): number => {
+      const compileBreak = (statement: ts.BreakStatement, loop: LoopTargets | null = null): number => {
         if (!loop) throw new Error(`${lineAndColumn(source, statement.getStart(source))}: BQ2015: break is not inside a lowered loop`);
         return allocateState(setStateAndContinue(loop.breakState));
       };
-      const compileContinue = (statement: ts.ContinueStatement, loop?: LoopTargets): number => {
+      const compileContinue = (statement: ts.ContinueStatement, loop: LoopTargets | null = null): number => {
         if (!loop || loop.continueState == null) throw new Error(`${lineAndColumn(source, statement.getStart(source))}: BQ2016: continue is not inside a lowered loop`);
         return allocateState(setStateAndContinue(loop.continueState));
       };
-      const compileSwitch = (statement: ts.SwitchStatement, next: number, loop?: LoopTargets): number => {
+      const compileSwitch = (statement: ts.SwitchStatement, next: number, loop: LoopTargets | null = null): number => {
         const discriminantType = nativeTypeNode(checker.getTypeAtLocation(statement.expression), statement.expression);
         if (!discriminantType) {
           throw new Error(`${lineAndColumn(source, statement.expression.getStart(source))}: BQ2025: switch discriminant has no concrete native shape`);
@@ -1307,8 +1328,8 @@ const lowerSource = (entry: SourceEntry): string => {
         const clauseEntries = new Map<ts.CaseOrDefaultClause, number>();
         let fallthroughState = next;
         for (let index = statement.caseBlock.clauses.length - 1; index >= 0; index--) {
-          const clause = required(statement.caseBlock.clauses[index], "statement.caseBlock.clauses[index]");
-          const entry = compileSequence(clause.statements, fallthroughState, { breakState: next, continueState: loop?.continueState });
+          const clause = required(statement.caseBlock.clauses[index] ?? null, "statement.caseBlock.clauses[index]");
+          const entry = compileSequence(clause.statements, fallthroughState, { breakState: next, continueState: loop ? loop.continueState : null });
           clauseEntries.set(clause, entry);
           fallthroughState = entry;
         }
@@ -1316,10 +1337,10 @@ const lowerSource = (entry: SourceEntry): string => {
         // JavaScript evaluates case labels from top to bottom until one matches.
         // Each label therefore receives its own resumable state. A label may
         // suspend without evaluating later labels or losing the discriminant.
-        const defaultClause = statement.caseBlock.clauses.find(ts.isDefaultClause);
-        let dispatchEntry = defaultClause ? required(clauseEntries.get(defaultClause), "clauseEntries.get(defaultClause)") : next;
+        const defaultClause = statement.caseBlock.clauses.find(ts.isDefaultClause) ?? null;
+        let dispatchEntry = defaultClause ? required(clauseEntries.get(defaultClause) ?? null, "clauseEntries.get(defaultClause)") : next;
         for (let index = statement.caseBlock.clauses.length - 1; index >= 0; index--) {
-          const clause = required(statement.caseBlock.clauses[index], "statement.caseBlock.clauses[index]");
+          const clause = required(statement.caseBlock.clauses[index] ?? null, "statement.caseBlock.clauses[index]");
           if (!ts.isCaseClause(clause)) continue;
           const labelField = `__bq_switch_case_${expressionCaptureIndex++}`;
           expressionCaptureFields.push({ field: labelField, type: discriminantType });
@@ -1331,7 +1352,7 @@ const lowerSource = (entry: SourceEntry): string => {
               ts.factory.createConditionalExpression(
                 ts.factory.createBinaryExpression(captureAccess, ts.SyntaxKind.EqualsEqualsEqualsToken, labelAccess),
                 ts.factory.createToken(ts.SyntaxKind.QuestionToken),
-                ts.factory.createNumericLiteral(required(clauseEntries.get(clause), "clauseEntries.get(clause)")),
+                ts.factory.createNumericLiteral(required(clauseEntries.get(clause) ?? null, "clauseEntries.get(clause)")),
                 ts.factory.createToken(ts.SyntaxKind.ColonToken),
                 ts.factory.createNumericLiteral(dispatchEntry),
               ),
@@ -1344,10 +1365,10 @@ const lowerSource = (entry: SourceEntry): string => {
         const assignDiscriminant = ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(captureAccess, ts.SyntaxKind.EqualsToken, statement.expression));
         return compileStatement(assignDiscriminant, dispatchEntry, loop);
       };
-      const compileForOf = (statement: ts.ForOfStatement, next: number, loop?: LoopTargets): number => {
+      const compileForOf = (statement: ts.ForOfStatement, next: number, loop: LoopTargets | null = null): number => {
         const iterableSourceType = checker.getTypeAtLocation(statement.expression);
-        const numericIndexType = checker.getIndexTypeOfType(iterableSourceType, ts.IndexKind.Number);
-        const lengthProperty = iterableSourceType.getProperty("length");
+        const numericIndexType = checker.getIndexTypeOfType(iterableSourceType, ts.IndexKind.Number) ?? null;
+        const lengthProperty = iterableSourceType.getProperty("length") ?? null;
         if (!numericIndexType || !lengthProperty) {
           throw new Error(`${lineAndColumn(source, statement.expression.getStart(source))}: BQ2026: for-of currently requires a statically indexable value with numeric elements and length\n  hint: Use an Array, tuple or StaticArray, or lower the iterator explicitly.`);
         }
@@ -1370,7 +1391,7 @@ const lowerSource = (entry: SourceEntry): string => {
           if (ts.isArrayBindingPattern(name)) {
             name.elements.forEach((element, elementIndex) => {
               if (ts.isOmittedExpression(element)) return;
-              if (element.dotDotDotToken || element.initializer) {
+              if ((element.dotDotDotToken ?? null) || (element.initializer ?? null)) {
                 throw new Error(`${lineAndColumn(source, element.getStart(source))}: BQ2027: for-of destructuring defaults and rest require explicit native assignments`);
               }
               bindForOfName(element.name, ts.factory.createElementAccessExpression(value, ts.factory.createNumericLiteral(elementIndex)));
@@ -1378,7 +1399,7 @@ const lowerSource = (entry: SourceEntry): string => {
             return;
           }
           for (const element of name.elements) {
-            if (element.dotDotDotToken || element.initializer) {
+            if ((element.dotDotDotToken ?? null) || (element.initializer ?? null)) {
               throw new Error(`${lineAndColumn(source, element.getStart(source))}: BQ2027: for-of destructuring defaults and rest require explicit native assignments`);
             }
             const property = element.propertyName ?? (ts.isIdentifier(element.name) ? element.name : null);
@@ -1395,7 +1416,7 @@ const lowerSource = (entry: SourceEntry): string => {
           throw new Error(`${lineAndColumn(source, statement.initializer.getStart(source))}: BQ2027: for-of requires exactly one declaration`);
         }
         if (ts.isVariableDeclarationList(statement.initializer)) {
-          bindForOfName(required(statement.initializer.declarations[0], "statement.initializer.declarations[0]").name, elementAccess);
+          bindForOfName(required(statement.initializer.declarations[0] ?? null, "statement.initializer.declarations[0]").name, elementAccess);
         } else {
           bindElementStatements.push(ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(rewrite(statement.initializer), ts.SyntaxKind.EqualsToken, elementAccess)));
         }
@@ -1425,8 +1446,8 @@ const lowerSource = (entry: SourceEntry): string => {
         const assignIterable = ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(iterableAccess, ts.SyntaxKind.EqualsToken, statement.expression));
         return compileStatement(assignIterable, initialiseIndex, loop);
       };
-      compileStatement = (statement: ts.Statement, next: number, loop?: LoopTargets): number => {
-        const point = awaitPoints.get(statement);
+      compileStatement = (statement: ts.Statement, next: number, loop: LoopTargets | null = null): number => {
+        const point = awaitPoints.get(statement) ?? null;
         if (point) return compileAwait(point, next);
         if (ts.isBlock(statement)) return compileSequence(statement.statements, next, loop);
         if (ts.isEmptyStatement(statement)) return next;
@@ -1443,7 +1464,8 @@ const lowerSource = (entry: SourceEntry): string => {
         }
         if (ts.isIfStatement(statement)) {
           const thenState = compileStatement(statement.thenStatement, next, loop);
-          const elseState = statement.elseStatement ? compileStatement(statement.elseStatement, next, loop) : next;
+          const alternative = statement.elseStatement ?? null;
+           const elseState = alternative ? compileStatement(alternative, next, loop) : next;
           return compileConditionalExpression(statement.expression, thenState, elseState);
         }
         if (ts.isWhileStatement(statement)) {
@@ -1496,7 +1518,7 @@ const lowerSource = (entry: SourceEntry): string => {
         ...bindings.filter(item => item.parameter).map(item => ts.factory.createParameterDeclaration(undefined, undefined, required(item.parameter, "item.parameter").name, undefined, item.type, undefined)),
       ];
       const constructorStatements: ts.Statement[] = [
-        ts.factory.createExpressionStatement(ts.factory.createCallExpression(ts.factory.createSuper(), undefined, [])),
+        ts.factory.createExpressionStatement(ts.factory.createCallExpression(ts.factory.createSuper(), [], [])),
         ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(ts.factory.createPropertyAccessExpression(ts.factory.createThis(), "__bq_task"), ts.SyntaxKind.EqualsToken, ts.factory.createIdentifier("__bq_task"))),
       ];
       if (unit.receiverType) constructorStatements.push(ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(ts.factory.createPropertyAccessExpression(ts.factory.createThis(), "__bq_this"), ts.SyntaxKind.EqualsToken, ts.factory.createIdentifier("__bq_this"))));
@@ -1523,7 +1545,7 @@ const lowerSource = (entry: SourceEntry): string => {
       const taskVariable = ts.factory.createIdentifier("__bq_task");
       const localFrame = ts.factory.createIdentifier("__bq_start_frame");
       const newTask = result.isVoid
-        ? ts.factory.createNewExpression(ts.factory.createIdentifier("__BqTaskVoid"), undefined, [])
+        ? ts.factory.createNewExpression(ts.factory.createIdentifier("__BqTaskVoid"), [], [])
         : ts.factory.createNewExpression(ts.factory.createIdentifier("__BqTask"), [result.native], []);
       const newFrameArguments: ts.Expression[] = [taskVariable, ...(unit.receiverType ? [ts.factory.createThis()] : []), ...unit.parameters.map(parameter => ts.factory.createIdentifier((parameter.name as ts.Identifier).text))];
       const wrapperBody = ts.factory.createBlock([
@@ -1533,7 +1555,7 @@ const lowerSource = (entry: SourceEntry): string => {
         ts.factory.createVariableStatement(undefined, ts.factory.createVariableDeclarationList([
           ts.factory.createVariableDeclaration(localFrame, undefined, frameTypeReference, ts.factory.createNewExpression(ts.factory.createIdentifier(frameName), frameTypeArguments, newFrameArguments)),
         ], ts.NodeFlags.Const)),
-        ts.factory.createExpressionStatement(ts.factory.createCallExpression(ts.factory.createPropertyAccessExpression(localFrame, "__bq_resume_frame"), undefined, [])),
+        ts.factory.createExpressionStatement(ts.factory.createCallExpression(ts.factory.createPropertyAccessExpression(localFrame, "__bq_resume_frame"), [], [])),
         ts.factory.createReturnStatement(taskVariable),
       ], true);
       const symbol = unit.symbol;
