@@ -1,6 +1,7 @@
 import type { BaguetteConfig } from "./contracts.ts";
 import processHost from "node:process";
 import * as fs from "node:fs/promises";
+import { mkdirSync } from "node:fs";
 import * as pathHost from "node:path";
 import { spawn } from "node:child_process";
 import { parseConfig, parseJsonObject } from "./contracts.ts";
@@ -8,7 +9,7 @@ import { required } from "./required.ts";
 import "./bake-stage.ts";
 import { modularWat } from "./wat-modules.ts";
 import ts from "typescript";
-import { nativeParameter } from "./ast.ts";
+import { nativeParameter, nativeVariable, nativeProperty, nativeFunction, nativeMethod, annotateCallable, annotateBinding } from "./ast.ts";
 import { assertCanonicalThistleSource } from "./source-contract.ts";
 
 /** Baguette 0.2.6: kernel-independent ahead-of-time TypeScript-to-WebAssembly compiler. */
@@ -1505,17 +1506,17 @@ const lowerSource = (entry: SourceEntry): string => {
       const switchStatement = ts.factory.createSwitchStatement(ts.factory.createPropertyAccessExpression(frameIdentifier, "__bq_state"),
         ts.factory.createCaseBlock([...clauses, ts.factory.createDefaultClause([ts.factory.createReturnStatement()])]));
       const frameMembers: ts.ClassElement[] = [
-        ts.factory.createPropertyDeclaration(undefined, "__bq_state", undefined, ts.factory.createTypeReferenceNode("i32"), ts.factory.createNumericLiteral(entryState)),
-        ts.factory.createPropertyDeclaration(undefined, "__bq_task", ts.factory.createToken(ts.SyntaxKind.ExclamationToken), taskType, undefined),
+        nativeProperty("__bq_state", ts.factory.createTypeReferenceNode("i32"), ts.factory.createNumericLiteral(entryState)),
+        nativeProperty("__bq_task", taskType, null),
       ];
-      if (unit.receiverType) frameMembers.push(ts.factory.createPropertyDeclaration(undefined, "__bq_this", ts.factory.createToken(ts.SyntaxKind.ExclamationToken), unit.receiverType, undefined));
-      for (const binding of bindings) frameMembers.push(ts.factory.createPropertyDeclaration(undefined, binding.field, ts.factory.createToken(ts.SyntaxKind.ExclamationToken), binding.type, undefined));
-      for (const capture of expressionCaptureFields) frameMembers.push(ts.factory.createPropertyDeclaration(undefined, capture.field, ts.factory.createToken(ts.SyntaxKind.ExclamationToken), capture.type, undefined));
-      for (const point of allAwaitPoints) frameMembers.push(ts.factory.createPropertyDeclaration(undefined, point.field, ts.factory.createToken(ts.SyntaxKind.ExclamationToken), taskTypeFor({ native: point.resultType, isVoid: point.resultVoid }), undefined));
+      if (unit.receiverType) frameMembers.push(nativeProperty("__bq_this", unit.receiverType, null));
+      for (const binding of bindings) frameMembers.push(nativeProperty(binding.field, binding.type, null));
+      for (const capture of expressionCaptureFields) frameMembers.push(nativeProperty(capture.field, capture.type, null));
+      for (const point of allAwaitPoints) frameMembers.push(nativeProperty(point.field, taskTypeFor({ native: point.resultType, isVoid: point.resultVoid }), null));
       const constructorParameters: ts.ParameterDeclaration[] = [
-        ts.factory.createParameterDeclaration(undefined, undefined, "__bq_task", undefined, taskType, undefined),
-        ...(unit.receiverType ? [ts.factory.createParameterDeclaration(undefined, undefined, "__bq_this", undefined, unit.receiverType, undefined)] : []),
-        ...bindings.filter(item => item.parameter).map(item => ts.factory.createParameterDeclaration(undefined, undefined, required(item.parameter, "item.parameter").name, undefined, item.type, undefined)),
+        nativeParameter("__bq_task", taskType),
+        ...(unit.receiverType ? [nativeParameter("__bq_this", unit.receiverType)] : []),
+        ...bindings.filter(item => item.parameter).map(item => nativeParameter(required(item.parameter, "item.parameter").name, item.type)),
       ];
       const constructorStatements: ts.Statement[] = [
         ts.factory.createExpressionStatement(ts.factory.createCallExpression(ts.factory.createSuper(), [], [])),
@@ -1526,19 +1527,19 @@ const lowerSource = (entry: SourceEntry): string => {
         const name = (required(binding.parameter, "binding.parameter").name as ts.Identifier).text;
         constructorStatements.push(ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(ts.factory.createPropertyAccessExpression(ts.factory.createThis(), binding.field), ts.SyntaxKind.EqualsToken, ts.factory.createIdentifier(name))));
       }
-      frameMembers.push(ts.factory.createConstructorDeclaration(undefined, constructorParameters, ts.factory.createBlock(constructorStatements, true)));
+      frameMembers.push(ts.factory.createConstructorDeclaration([], constructorParameters, ts.factory.createBlock(constructorStatements, true)));
       const resumeBody = ts.factory.createBlock([
-        ts.factory.createVariableStatement(undefined, ts.factory.createVariableDeclarationList([
-          ts.factory.createVariableDeclaration(frameIdentifier, undefined, frameTypeReference, ts.factory.createThis()),
+        ts.factory.createVariableStatement([], ts.factory.createVariableDeclarationList([
+          nativeVariable(frameIdentifier, frameTypeReference, ts.factory.createThis()),
         ], ts.NodeFlags.Const)),
         ts.factory.createWhileStatement(ts.factory.createTrue(), ts.factory.createBlock([switchStatement], true)),
       ], true);
-      frameMembers.push(ts.factory.createMethodDeclaration(undefined, undefined, "__bq_resume_frame", undefined, undefined, [], ts.factory.createKeywordTypeNode(ts.SyntaxKind.VoidKeyword), resumeBody));
+      frameMembers.push(nativeMethod({name: ts.factory.createIdentifier("__bq_resume_frame"), modifiers: [], typeParameters: [], parameters: [], returns: ts.factory.createKeywordTypeNode(ts.SyntaxKind.VoidKeyword), body: resumeBody, question: false}));
       const frameClass = ts.factory.createClassDeclaration(
-        undefined,
+        [],
         frameName,
         unit.frameTypeParameters,
-        [ts.factory.createHeritageClause(ts.SyntaxKind.ExtendsKeyword, [ts.factory.createExpressionWithTypeArguments(ts.factory.createIdentifier("__BqContinuation"), undefined)])],
+        [ts.factory.createHeritageClause(ts.SyntaxKind.ExtendsKeyword, [ts.factory.createExpressionWithTypeArguments(ts.factory.createIdentifier("__BqContinuation"), [])])],
         frameMembers,
       );
 
@@ -1549,11 +1550,11 @@ const lowerSource = (entry: SourceEntry): string => {
         : ts.factory.createNewExpression(ts.factory.createIdentifier("__BqTask"), [result.native], []);
       const newFrameArguments: ts.Expression[] = [taskVariable, ...(unit.receiverType ? [ts.factory.createThis()] : []), ...unit.parameters.map(parameter => ts.factory.createIdentifier((parameter.name as ts.Identifier).text))];
       const wrapperBody = ts.factory.createBlock([
-        ts.factory.createVariableStatement(undefined, ts.factory.createVariableDeclarationList([
-          ts.factory.createVariableDeclaration(taskVariable, undefined, taskType, newTask),
+        ts.factory.createVariableStatement([], ts.factory.createVariableDeclarationList([
+          nativeVariable(taskVariable, taskType, newTask),
         ], ts.NodeFlags.Const)),
-        ts.factory.createVariableStatement(undefined, ts.factory.createVariableDeclarationList([
-          ts.factory.createVariableDeclaration(localFrame, undefined, frameTypeReference, ts.factory.createNewExpression(ts.factory.createIdentifier(frameName), frameTypeArguments, newFrameArguments)),
+        ts.factory.createVariableStatement([], ts.factory.createVariableDeclarationList([
+          nativeVariable(localFrame, frameTypeReference, ts.factory.createNewExpression(ts.factory.createIdentifier(frameName), frameTypeArguments, newFrameArguments)),
         ], ts.NodeFlags.Const)),
         ts.factory.createExpressionStatement(ts.factory.createCallExpression(ts.factory.createPropertyAccessExpression(localFrame, "__bq_resume_frame"), [], [])),
         ts.factory.createReturnStatement(taskVariable),
@@ -1561,20 +1562,20 @@ const lowerSource = (entry: SourceEntry): string => {
       const symbol = unit.symbol;
       const support = [frameClass].map(statement => ts.visitEachChild(statement, visit, context) as ts.Statement);
       const wrapper = unit.method
-        ? ts.factory.createMethodDeclaration(withoutAsyncModifier(unit.modifiers, false), undefined, unit.method.name, unit.method.questionToken, unit.typeParameters, unit.parameters, taskType, wrapperBody)
+        ? nativeMethod({name: unit.method.name, modifiers: withoutAsyncModifier(unit.modifiers, false), question: Boolean(unit.method.questionToken ?? null), typeParameters: unit.typeParameters, parameters: unit.parameters, returns: taskType, body: wrapperBody})
         : ts.factory.createFunctionDeclaration(withoutAsyncModifier(unit.modifiers, Boolean(abiSymbols.has(symbol))), undefined,
           unit.name, unit.typeParameters, unit.parameters, taskType, wrapperBody);
       return { support, wrapper: ts.visitEachChild(wrapper, visit, context) as ts.FunctionDeclaration | ts.MethodDeclaration };
     };
-    const findAsyncUnit = (name: ts.Identifier, location: ts.Node, kind: string, method?: ts.MethodDeclaration): AsyncUnit => {
+    const findAsyncUnit = (name: ts.Identifier, location: ts.Node, kind: string, method: ts.MethodDeclaration | null = null): AsyncUnit => {
       const symbol = symbolOf(name);
-      const unit = symbol && asyncFunctionDeclarations.find(item => item.symbol === symbol && (!method || item.method === method));
+      const unit = symbol ? asyncFunctionDeclarations.find(item => item.symbol === symbol && (!method || item.method === method)) ?? null : null;
       if (!unit) throw new Error(`${lineAndColumn(source, location.getStart(source))}: BQ2013: missing async ${kind} unit`);
       return unit;
     };
     const namespaceName = (name: ts.Identifier, node: ts.Node, kind: string): ts.Identifier => {
       const target = symbolOf(name);
-      const replacement = target && (abiSymbols.get(target) ?? renamedSymbols.get(target));
+      const replacement = target ? abiSymbols.get(target) ?? (renamedSymbols.get(target) ?? null) : null;
       if (!replacement) throw new Error(`${lineAndColumn(source, node.getStart(source))}: namespace ${kind} ${node.getText(source)} does not resolve to a flattened Baguette symbol`);
       return ts.factory.createIdentifier(replacement);
     };
@@ -1583,19 +1584,22 @@ const lowerSource = (entry: SourceEntry): string => {
       return symbol ? abiSymbols.get(symbol) ?? renamedSymbols.get(symbol) ?? null : null;
     };
     visit = node => {
-      if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) return undefined;
-      if (ts.isFunctionDeclaration(node) && node.name && node.body && functionHasAsyncModifier(node) && asyncLowering === "state-machine") {
-        const lowered = lowerAsyncFunction(findAsyncUnit(node.name, node, "function"));
+      if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) return [];
+      const functionName = ts.isFunctionDeclaration(node) ? node.name ?? null : null;
+      const hasBody = (ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) && Boolean(node.body ?? null);
+      if (ts.isFunctionDeclaration(node) && functionName && hasBody && functionHasAsyncModifier(node) && asyncLowering === "state-machine") {
+        const lowered = lowerAsyncFunction(findAsyncUnit(functionName, node, "function"));
         return [...lowered.support, lowered.wrapper];
       }
       const declaration = ts.isVariableStatement(node) && node.declarationList.declarations.length === 1 ? node.declarationList.declarations[0] ?? null : null;
-      if (declaration && ts.isIdentifier(declaration.name) && declaration.initializer
-        && (ts.isArrowFunction(declaration.initializer) || ts.isFunctionExpression(declaration.initializer))
-        && functionHasAsyncModifier(declaration.initializer) && asyncLowering === "state-machine") {
+      const initializer = declaration ? declaration.initializer ?? null : null;
+      if (declaration && ts.isIdentifier(declaration.name) && initializer
+        && (ts.isArrowFunction(initializer) || ts.isFunctionExpression(initializer))
+        && functionHasAsyncModifier(initializer) && asyncLowering === "state-machine") {
         const lowered = lowerAsyncFunction(findAsyncUnit(declaration.name, declaration, "expression"));
         return [...lowered.support, lowered.wrapper];
       }
-      if (ts.isMethodDeclaration(node) && node.body && ts.isIdentifier(node.name) && functionHasAsyncModifier(node) && asyncLowering === "state-machine") {
+      if (ts.isMethodDeclaration(node) && hasBody && ts.isIdentifier(node.name) && functionHasAsyncModifier(node) && asyncLowering === "state-machine") {
         const lowered = lowerAsyncFunction(findAsyncUnit(node.name, node, "method", node));
         asyncSupportStatements.push(...lowered.support);
         return lowered.wrapper;
@@ -1606,33 +1610,23 @@ const lowerSource = (entry: SourceEntry): string => {
       if (ts.isQualifiedName(node) && ts.isIdentifier(node.left) && namespaceImportSymbol(node.left)) {
         return namespaceName(node.right, node, "type");
       }
-      const overloadSymbol = (ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) && !node.body && node.name ? symbolOf(node.name) : null;
-      const hasImplementation = overloadSymbol?.declarations?.some(declaration =>
-        (ts.isFunctionDeclaration(node) && ts.isFunctionDeclaration(declaration) || ts.isMethodDeclaration(node) && ts.isMethodDeclaration(declaration)) && Boolean(declaration.body));
+      const overloadName = ts.isMethodDeclaration(node) ? node.name : functionName;
+      const overloadSymbol = overloadName && !hasBody ? symbolOf(overloadName) : null;
+      const hasImplementation = (overloadSymbol ? overloadSymbol.declarations ?? [] : []).some(declaration =>
+        (ts.isFunctionDeclaration(node) && ts.isFunctionDeclaration(declaration) || ts.isMethodDeclaration(node) && ts.isMethodDeclaration(declaration)) && Boolean(declaration.body ?? null));
       if (hasImplementation) return undefined;
-      if (ts.isVariableDeclaration(node) && !node.type) {
+      if ((ts.isVariableDeclaration(node) || ts.isParameter(node) || ts.isPropertyDeclaration(node)) && !(node.type ?? null)) {
         const inferred = inferredTypeFor(node.name, node.initializer ?? null);
-        return ts.visitEachChild(ts.factory.updateVariableDeclaration(node, node.name, node.exclamationToken, inferred ?? node.type, node.initializer), visit, context);
+        return ts.visitEachChild(inferred ? annotateBinding(node, inferred) : node, visit, context);
       }
-      if (ts.isParameter(node) && !node.type) {
-        const inferred = inferredTypeFor(node.name);
-        return ts.visitEachChild(ts.factory.updateParameterDeclaration(node, node.modifiers, node.dotDotDotToken, node.name, node.questionToken, inferred ?? node.type, node.initializer), visit, context);
+      if ((ts.isFunctionExpression(node) || ts.isMethodDeclaration(node) || ts.isGetAccessorDeclaration(node)) && !(node.type ?? null)) {
+        const inferred = inferredReturnTypeFor(node);
+        return ts.visitEachChild(inferred ? annotateCallable(node, inferred, node.modifiers ?? []) : node, visit, context);
       }
-      if (ts.isPropertyDeclaration(node) && !node.type) {
-        const inferred = inferredTypeFor(node.name, node.initializer ?? null);
-        return ts.visitEachChild(ts.factory.updatePropertyDeclaration(node, node.modifiers, node.name, node.questionToken ?? node.exclamationToken, inferred ?? node.type, node.initializer), visit, context);
-      }
-      if (ts.isFunctionExpression(node) && !node.type) {
-        return ts.visitEachChild(ts.factory.updateFunctionExpression(node, node.modifiers, node.asteriskToken, node.name, node.typeParameters, node.parameters, inferredReturnTypeFor(node) ?? node.type, node.body), visit, context);
-      }
-      if (ts.isArrowFunction(node) && !node.type) {
-        return ts.visitEachChild(ts.factory.updateArrowFunction(node, node.modifiers, node.typeParameters, node.parameters, inferredReturnTypeFor(node) ?? node.type, node.equalsGreaterThanToken, node.body), visit, context);
-      }
-      if (ts.isMethodDeclaration(node) && !node.type) {
-        return ts.visitEachChild(ts.factory.updateMethodDeclaration(node, node.modifiers, node.asteriskToken, node.name, node.questionToken, node.typeParameters, node.parameters, inferredReturnTypeFor(node) ?? node.type, node.body), visit, context);
-      }
-      if (ts.isGetAccessorDeclaration(node) && !node.type) {
-        return ts.visitEachChild(ts.factory.updateGetAccessorDeclaration(node, node.modifiers, node.name, node.parameters, inferredReturnTypeFor(node) ?? node.type, node.body), visit, context);
+      if (ts.isArrowFunction(node) && !(node.type ?? null)) {
+        const inferred = inferredReturnTypeFor(node);
+        const annotated = inferred ? ts.factory.updateArrowFunction(node, node.modifiers ?? [], node.typeParameters ?? [], node.parameters, inferred, node.equalsGreaterThanToken, node.body) : node;
+        return ts.visitEachChild(annotated, visit, context);
       }
       if (ts.isIdentifier(node)) {
         const replacement = flattenedName(node);
@@ -1645,28 +1639,26 @@ const lowerSource = (entry: SourceEntry): string => {
         const literal = node.getText(source);
         return ts.factory.createNumericLiteral(literal.endsWith("n") ? literal.slice(0, -1) : literal);
       }
-      if (ts.isAsExpression(node)) return ts.factory.createTypeAssertion(assemblyType(node.type), ts.visitNode(node.expression, visit) as ts.Expression);
+      if (ts.isAsExpression(node)) return ts.factory.createTypeAssertion(assemblyType(node.type), ts.visitNode(node.expression, visit, ts.isExpression));
       if (ts.isNonNullExpression(node)) {
         const narrowed = nativeTypeNode(checker.getTypeAtLocation(node), node);
-        const expression = ts.visitNode(node.expression, visit) as ts.Expression;
+        const expression = ts.visitNode(node.expression, visit, ts.isExpression);
         return narrowed ? ts.factory.createTypeAssertion(narrowed, expression) : expression;
       }
-      if (ts.isSatisfiesExpression(node)) return ts.visitNode(node.expression, visit);
-      if (ts.isVariableStatement(node) && declaration && ts.isIdentifier(declaration.name) && declaration.initializer && ts.isArrowFunction(declaration.initializer)) {
+      if (ts.isSatisfiesExpression(node)) return ts.visitNode(node.expression, visit, ts.isExpression);
+      if (ts.isVariableStatement(node) && declaration && ts.isIdentifier(declaration.name) && initializer && ts.isArrowFunction(initializer)) {
           const symbol = symbolOf(declaration.name);
           const isAbi = Boolean(symbol && abiSymbols.has(symbol));
-          const arrow = declaration.initializer;
+          const arrow = initializer;
           const body = ts.isBlock(arrow.body) ? arrow.body : ts.factory.createBlock([ts.factory.createReturnStatement(arrow.body)], true);
-          const functionNode = ts.factory.createFunctionDeclaration(
-            stripExportModifiers(node.modifiers ?? null, isAbi), undefined, declaration.name, arrow.typeParameters, arrow.parameters, arrow.type, body,
-          );
+          const functionNode = nativeFunction({modifiers: stripExportModifiers(node.modifiers ?? null, isAbi), name: declaration.name, typeParameters: arrow.typeParameters ?? [], parameters: arrow.parameters, returns: arrow.type ?? null, body});
           return ts.visitEachChild(functionNode, visit, context);
       }
-      if (ts.isFunctionDeclaration(node) && node.name) {
-        const symbol = symbolOf(node.name);
-        return ts.visitEachChild(ts.factory.updateFunctionDeclaration(node, stripExportModifiers(node.modifiers ?? null, Boolean(symbol && abiSymbols.has(symbol))), node.asteriskToken, node.name, node.typeParameters, node.parameters, node.type ?? inferredReturnTypeFor(node) ?? node.type, node.body), visit, context);
+      if (ts.isFunctionDeclaration(node) && functionName) {
+        const symbol = symbolOf(functionName);
+        return ts.visitEachChild(annotateCallable(node, node.type ?? inferredReturnTypeFor(node), stripExportModifiers(node.modifiers ?? null, Boolean(symbol && abiSymbols.has(symbol)))), visit, context);
       }
-      const preserveRange = ts.canHaveModifiers(node) && ts.getModifiers(node)?.some(item => item.kind === ts.SyntaxKind.ExportKeyword);
+      const preserveRange = ts.canHaveModifiers(node) && (ts.getModifiers(node) ?? []).some(item => item.kind === ts.SyntaxKind.ExportKeyword);
       const clone = ts.visitEachChild(node, visit, context);
       if (preserveRange && ts.canHaveModifiers(clone)) ts.setTextRange(clone, node);
       return clone;
@@ -1680,7 +1672,7 @@ const lowerSource = (entry: SourceEntry): string => {
   };
   const result = ts.transform(source, [transformer]);
   try {
-    const lowered = required(result.transformed[0], "result.transformed[0]");
+    const lowered = required(result.transformed[0] ?? null, "result.transformed[0]");
     let printed = ts.createPrinter({ newLine: ts.NewLineKind.LineFeed, removeComments: false }).printFile(lowered);
     // Non-function exports are internal in the flattened module. AssemblyScript would otherwise expose mutable kernel state.
     printed = printed.replace(/^export\s+(?=(?:const|let|var|class|enum|namespace|interface|type)\b)/gm, "");
@@ -1691,7 +1683,7 @@ const lowerSource = (entry: SourceEntry): string => {
 const compilerVersion = async (packagePath: string): Promise<string> => {
   const packageText = await readText(packagePath);
   const value = parseJsonObject(packageText);
-  const version = value.version;
+  const version = value.version ?? null;
   return typeof version === "string" ? version : "unreported";
 };
 const ascVersion = await compilerVersion(`${root}/node_modules/assemblyscript/package.json`);
@@ -1707,7 +1699,7 @@ for (const variant of variants) {
 }
 const sourceHash = await sha256(encoder.encode(sourceEntries.map(entry => `${entry.path}\n${entry.text}`).join("\n")));
 const loweredSourceHashes = Object.fromEntries(await Promise.all(variants.map(async variant => {
-  const prelude = required(variantPreludes.get(variant.name), "variantPreludes.get(variant.name)");
+  const prelude = required(variantPreludes.get(variant.name) ?? null, "variantPreludes.get(variant.name)");
   return [variant.name, await sha256(encoder.encode(`${prelude.text}\n${customPrelude}\n${generatedBody}`))] as const;
 })));
 
@@ -1732,10 +1724,10 @@ const instantiateImports = (threaded: boolean): WebAssembly.Imports => {
   return imports;
 };
 const argumentValue = (value: number | string): number | bigint => typeof value === "number" ? value : BigInt(value);
-const verifyFunction = (native: Record<string, WebAssembly.ExportValue>, wasmPath: string, name: string, args?: Array<number | string>, expected?: number | string): void => {
-  const fn = native[name];
+const verifyFunction = (native: Record<string, WebAssembly.ExportValue>, wasmPath: string, name: string, args: Array<number | string> | null, expected: number | string | null): void => {
+  const fn = native[name] ?? null;
   if (typeof fn !== "function") throw new Error(`${relative(wasmPath)} lacks verification function ${name}`);
-  const result = (fn as CallableFunction)(...(args ?? []).map(argumentValue));
+  const result = (fn as (...args: Array<number | bigint>) => number | bigint | void)(...(args ?? []).map(argumentValue));
   if (expected != null && result !== argumentValue(expected)) throw new Error(`${relative(wasmPath)} ${name} returned ${String(result)}`);
 };
 const verifyModule = async (wasmPath: string, threaded: boolean): Promise<Omit<VariantResult, "file" | "bytes" | "sha256" | "threaded">> => {
@@ -1748,18 +1740,18 @@ const verifyModule = async (wasmPath: string, threaded: boolean): Promise<Omit<V
   if (unexpectedImports.length) throw new Error(`${relative(wasmPath)} has undeclared host imports: ${unexpectedImports.map(importKey).join(", ")}`);
   const exports = WebAssembly.Module.exports(module);
   const exportMap = new Map(exports.map(item => [item.name, item.kind]));
-  for (const required of abiFunctions) if (exportMap.get(required.name) !== "function") throw new Error(`${relative(wasmPath)} is missing native function export ${required.name}`);
+  for (const required of abiFunctions) if ((exportMap.get(required.name) ?? null) !== "function") throw new Error(`${relative(wasmPath)} is missing native function export ${required.name}`);
   const unexpectedKinds = config.abi.allowNonFunctionExports ? [] : exports.filter(item => item.kind !== "function");
   if (unexpectedKinds.length) throw new Error(`${relative(wasmPath)} unexpectedly exports non-function state: ${unexpectedKinds.map(item => `${item.name}:${item.kind}`).join(", ")}`);
   const instance = new WebAssembly.Instance(module, instantiateImports(threaded));
   const native = instance.exports as Record<string, WebAssembly.ExportValue>;
   const verification = config.abi.verify;
-  if (verification?.init) verifyFunction(native, wasmPath, verification.init, verification.initArgs, verification.initExpected);
-  if (verification?.valid) verifyFunction(native, wasmPath, verification.valid, verification.validArgs, verification.validExpected);
+  if (verification && verification.init) verifyFunction(native, wasmPath, verification.init, verification.initArgs, verification.initExpected);
+  if (verification && verification.valid) verifyFunction(native, wasmPath, verification.valid, verification.validArgs, verification.validExpected);
   for (const test of config.abi.tests ?? []) {
-    const fn = native[test.function];
+    const fn = native[test.function] ?? null;
     if (typeof fn !== "function") throw new Error(`${relative(wasmPath)} lacks ABI test function ${test.function}`);
-    const result = (fn as CallableFunction)(...(test.args ?? []).map(argumentValue));
+    const result = (fn as (...args: Array<number | bigint>) => number | bigint | void)(...(test.args ?? []).map(argumentValue));
     if (result !== argumentValue(test.expected)) throw new Error(`${relative(wasmPath)} ABI test ${test.function} returned ${String(result)}, expected ${String(test.expected)}`);
   }
   return { imports, exports, functionCount: exports.filter(item => item.kind === "function").length };
@@ -1779,8 +1771,8 @@ const reportValidation = (): void => {
 };
 const buildOutputs = async (): Promise<void> => {
   await fs.rm(generated, { recursive: true, force: true });
-  await fs.mkdir(generated, { recursive: true });
-  await fs.mkdir(output, { recursive: true });
+  mkdirSync(generated, { recursive: true });
+  mkdirSync(output, { recursive: true });
   const variantResults: Record<string, VariantResult> = {};
   const modularLayouts: Record<string, string> = {};
   for (const variant of variants) {
@@ -1790,10 +1782,10 @@ const buildOutputs = async (): Promise<void> => {
     const optimisedRepeatPath = `${generated}/${variant.name}.repeat.wasm`;
     const wasmPath = `${output}/${variant.name}.wasm`;
     const watPath = `${generated}/${variant.name}.wat`;
-    const variantPrelude = required(variantPreludes.get(variant.name), "variantPreludes.get(variant.name)").text;
+    const variantPrelude = required(variantPreludes.get(variant.name) ?? null, "variantPreludes.get(variant.name)").text;
     const sourceText = `${variantPrelude}\n${customPrelude}\n${generatedBody}`;
     await fs.writeFile(sourcePath, sourceText);
-    const asc = async (destination: string, textFile?: string): Promise<void> => {
+    const asc = async (destination: string, textFile: string | null = null): Promise<void> => {
       const command = ["node", `${root}/node_modules/assemblyscript/bin/asc.js`, sourcePath,
         "--outFile", destination, "--runtime", config.runtime ?? "stub", "--zeroFilledMemory",
         "--initialMemory", String(config.memory.initialPages ?? 256), "--maximumMemory", String(config.memory.maximumPages ?? 32768),
@@ -1814,9 +1806,9 @@ const buildOutputs = async (): Promise<void> => {
       // Preserve the relative source tree from the common lowered-source root.
       const parts = sourceEntries.map(entry => entry.path.split("/"));
       let common = 0;
-      while (parts.every(item => item.length > common + 1 && item[common] === parts[0]?.[common])) common++;
+      while (parts.every(item => item.length > common + 1 && (item[common] ?? null) === ((parts[0] ?? [])[common] ?? null))) common++;
       const modules = sourceEntries.map((entry, index) => {
-        const source = required(parts[index], "parts[index]").slice(common).join("/");
+        const source = required(parts[index] ?? null, "parts[index]").slice(common).join("/");
         return {
           source,
           file: source.replace(/\.tsx?$/, ".wat"),
@@ -1828,7 +1820,7 @@ const buildOutputs = async (): Promise<void> => {
       const destination = `${generated}/${variant.name}`;
       for (const [file, body] of emitted.files) {
         const target = `${destination}/${file}`;
-        await fs.mkdir(pathHost.dirname(target), { recursive: true });
+        mkdirSync(pathHost.dirname(target), { recursive: true });
         await fs.writeFile(target, body);
       }
       const layout = `${destination}/layout.json`;
@@ -1841,7 +1833,7 @@ const buildOutputs = async (): Promise<void> => {
       await asc(rawRepeatPath);
       await optimise(rawRepeatPath, optimisedRepeatPath);
       const first = await readBytes(wasmPath), second = await readBytes(optimisedRepeatPath);
-      if (first.byteLength !== second.byteLength || first.some((byte, index) => byte !== second[index])) throw new Error(`${variant.name} is not deterministic across identical Baguette builds`);
+      if (first.byteLength !== second.byteLength || first.some((byte, index) => byte !== (second[index] ?? null))) throw new Error(`${variant.name} is not deterministic across identical Baguette builds`);
       console.log(`Baguette: deterministic rebuild verified for ${variant.name}`);
     };
     if (!skipDeterminism) await verifyDeterminism();
@@ -1915,7 +1907,7 @@ const buildOutputs = async (): Promise<void> => {
   console.log(`Baguette ${BAGUETTE_VERSION} generated native ${config.name ?? "Module"} WebAssembly from ${sourceEntries.length} TypeScript modules`);
   console.log(`  entries: ${config.entries.join(", ")}`);
   console.log(`  ABI: ${abiFunctions.length} direct WebAssembly function exports`);
-  for (const variant of variants) { const result = required(variantResults[`${variant.name}.wasm`], "variantResults[`${variant.name}.wasm`]"); console.log(`  ${result.file}  ${result.bytes} bytes  sha256 ${result.sha256}`); }
+  for (const variant of variants) { const result = required(variantResults[`${variant.name}.wasm`] ?? null, "variantResults[`${variant.name}.wasm`]"); console.log(`  ${result.file}  ${result.bytes} bytes  sha256 ${result.sha256}`); }
   console.log(`  deterministic rebuild: ${skipDeterminism ? "skipped" : "verified"}`);
   console.log("  native module instantiation and configured ABI checks: verified");
 };
