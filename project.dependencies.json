@@ -3,7 +3,7 @@
   "dependencies": [
     {
       "name": "KITTYX",
-      "repository": "kitty-crow/kittyx",
+      "repository": "kittycrow-kittyx/kittyx",
       "path": "vendor/kittyx",
       "commit": "6d6dbac796d59e8ea07c52cbcd3a0b7f181da163",
       "relationship": "contract",
