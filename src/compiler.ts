@@ -8,6 +8,7 @@ import { required } from "./required.ts";
 import "./bake-stage.ts";
 import { modularWat } from "./wat-modules.ts";
 import ts from "typescript";
+import { nativeParameter } from "./ast.ts";
 import { assertCanonicalThistleSource } from "./source-contract.ts";
 
 /** Baguette 0.2.6: kernel-independent ahead-of-time TypeScript-to-WebAssembly compiler. */
@@ -46,7 +47,7 @@ const encoder = new TextEncoder();
 
 const optionValue = (name: string): string | null => {
   const prefix = `${name}=`;
-  const direct = processHost.argv.find(value => value.startsWith(prefix));
+  const direct = processHost.argv.find(value => value.startsWith(prefix)) ?? null;
   if (direct) return direct.slice(prefix.length);
   const index = processHost.argv.indexOf(name);
   return index >= 0 ? processHost.argv[index + 1] ?? null : null;
@@ -62,11 +63,11 @@ const configRoot = pathHost.dirname(configPath);
 /** Retry only timed-out backend jobs; a normal nonzero exit indicates a compiler fault, not a transient timeout. */
 const run = async (command: string[], label: string, attempts = 1, timeoutMs = 240_000): Promise<BunResult> => {
   // A timeout can leave a backend in a partial state; retries must spawn a fresh process. A normal compiler rejection is final.
-  if (!command[0]) throw new Error(`${label} has no executable`);
+  if (!(command[0] ?? null)) throw new Error(`${label} has no executable`);
   let lastExit = -1;
   let lastTimedOut = false;
   for (let attempt = 1; attempt <= attempts; attempt++) {
-    const child = spawn(required(command[0], "backend executable"), command.slice(1), { cwd: root, env: processHost.env, stdio: "inherit" });
+    const child = spawn(required(command[0] ?? null, "backend executable"), command.slice(1), { cwd: root, env: processHost.env, stdio: "inherit" });
     const exited = new Promise<number>(resolve => {
       child.once("exit", code => resolve(code ?? 1));
       child.once("error", () => resolve(1));
@@ -100,8 +101,10 @@ const lineAndColumn = (source: ts.SourceFile, position: number): string => {
 };
 const diagnosticText = (diagnostic: ts.Diagnostic): string => {
   const message = ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n");
-  if (!diagnostic.file || diagnostic.start == null) return message;
-  return `${lineAndColumn(diagnostic.file, diagnostic.start)}: ${message}`;
+  const file = diagnostic.file ?? null;
+  const start = diagnostic.start ?? null;
+  if (!file || start === null) return message;
+  return `${lineAndColumn(file, start)}: ${message}`;
 };
 const config: BaguetteConfig = parseConfig(await readText(configPath));
 assertCanonicalThistleSource(config);
@@ -118,9 +121,8 @@ const typeAliases = new Map(Object.entries({ ...defaultTypeAliases, ...(config.t
 const defaultAbiTypes: Record<string, "number" | "bigint" | "void"> = { number: "number", bigint: "bigint", boolean: "number", void: "void" };
 const abiTypes = new Map(Object.entries({ ...defaultAbiTypes, ...(config.abiTypes ?? {}) }));
 
-const configFile = ts.readConfigFile(projectPath, file => ts.sys.readFile(file));
-if (configFile.error) throw new Error(diagnosticText(configFile.error));
-const parsedProject = ts.parseJsonConfigFileContent(configFile.config, ts.sys, pathHost.dirname(projectPath), {
+const configFile = ts.readJsonConfigFile(projectPath, ts.sys.readFile);
+const parsedProject = ts.parseJsonSourceFileConfigFileContent(configFile, ts.sys, pathHost.dirname(projectPath), {
   noEmit: true,
   incremental: false,
   composite: false,
@@ -151,26 +153,34 @@ for (const source of program.getSourceFiles()) {
 for (const entry of entryPaths) if (!sourceByAbsolute.has(entry)) throw new Error(`Baguette could not load entry ${relative(entry)}`);
 
 const resolveDependency = (source: ts.SourceFile, specifier: string): string | null => {
-  const result = ts.resolveModuleName(specifier, source.fileName, compilerOptions, ts.sys).resolvedModule;
-  if (!result || result.isExternalLibraryImport) return null;
+  const result = ts.resolveModuleName(specifier, source.fileName, compilerOptions, ts.sys).resolvedModule ?? null;
+  if (!result || (result.isExternalLibraryImport ?? false)) return null;
   const resolved = pathHost.normalize(pathHost.resolve(result.resolvedFileName.replace(/\.d\.ts$/, ".ts")));
   return sourceByAbsolute.has(resolved) ? resolved : null;
+};
+const typeOnlyImport = (statement: ts.ImportDeclaration | ts.ExportDeclaration): boolean => {
+  if (ts.isExportDeclaration(statement)) return statement.isTypeOnly;
+  const clause = statement.importClause ?? null;
+  if (!clause) return false;
+  if (clause.isTypeOnly) return true;
+  const bindings = clause.namedBindings ?? null;
+  return Boolean(bindings && ts.isNamedImports(bindings) && bindings.elements.every(item => item.isTypeOnly));
 };
 const dependencies = new Map<string, string[]>();
 const unresolvedRuntimeImports: string[] = [];
 for (const [absolute, source] of sourceByAbsolute) {
   const items: string[] = [];
   for (const statement of source.statements) {
-    if ((!ts.isImportDeclaration(statement) && !ts.isExportDeclaration(statement)) || !statement.moduleSpecifier || !ts.isStringLiteral(statement.moduleSpecifier)) continue;
-      const dependency = resolveDependency(source, statement.moduleSpecifier.text);
+    if (!ts.isImportDeclaration(statement) && !ts.isExportDeclaration(statement)) continue;
+      const specifier = statement.moduleSpecifier ?? null;
+      if (!specifier || !ts.isStringLiteral(specifier)) continue;
+      const dependency = resolveDependency(source, specifier.text);
       if (dependency) {
         items.push(dependency);
         continue;
       }
-      const importIsTypeOnly = ts.isImportDeclaration(statement)
-        ? Boolean(statement.importClause?.isTypeOnly || statement.importClause?.namedBindings && ts.isNamedImports(statement.importClause.namedBindings) && statement.importClause.namedBindings.elements.every(item => item.isTypeOnly))
-        : statement.isTypeOnly;
-      if (!importIsTypeOnly) unresolvedRuntimeImports.push(`${relative(source.fileName)} imports external runtime module ${JSON.stringify(statement.moduleSpecifier.text)}`);
+      const importIsTypeOnly = typeOnlyImport(statement);
+      if (!importIsTypeOnly) unresolvedRuntimeImports.push(`${relative(source.fileName)} imports external runtime module ${JSON.stringify(specifier.text)}`);
   }
   dependencies.set(absolute, items);
 }
@@ -194,7 +204,7 @@ for (const entry of entryPaths) visitModule(entry);
 
 const sourceEntries: SourceEntry[] = [];
 for (const absolutePath of orderedPaths) {
-  const source = required(sourceByAbsolute.get(absolutePath), "sourceByAbsolute.get(absolutePath)");
+  const source = required(sourceByAbsolute.get(absolutePath) ?? null, "sourceByAbsolute.get(absolutePath)");
   const text = await readText(absolutePath);
   sourceEntries.push({ path: relative(absolutePath), absolutePath, text, source, sha256: await sha256(encoder.encode(text)) });
 }
@@ -205,7 +215,7 @@ interface BaguetteDiagnostic {
   readonly code: string;
   readonly node: ts.Node;
   readonly message: string;
-  readonly hint?: string | undefined;
+  readonly hint: string | null;
 }
 const diagnosticLine = (source: ts.SourceFile, diagnostic: BaguetteDiagnostic): string => {
   const head = `${lineAndColumn(source, diagnostic.node.getStart(source))}: ${diagnostic.code}: ${diagnostic.message}`;
@@ -215,7 +225,7 @@ const isExplicitAny = (node: ts.Node): boolean => node.kind === ts.SyntaxKind.An
 const isExplicitUnknown = (node: ts.Node): boolean => node.kind === ts.SyntaxKind.UnknownKeyword;
 const functionHasAsyncModifier = (node: ts.Node): boolean => ts.isFunctionLike(node)
   && ts.canHaveModifiers(node)
-  && Boolean(ts.getModifiers(node)?.some(item => item.kind === ts.SyntaxKind.AsyncKeyword));
+  && Boolean((ts.getModifiers(node) ?? []).some(item => item.kind === ts.SyntaxKind.AsyncKeyword));
 const containsAwait = (node: ts.Node): boolean => {
   let found = false;
   const walk = (current: ts.Node): void => {
@@ -229,7 +239,7 @@ const containsAwait = (node: ts.Node): boolean => {
 };
 const validateSource = (entry: SourceEntry): void => {
   const errors: BaguetteDiagnostic[] = [];
-  const fail = (node: ts.Node, code: string, message: string, hint?: string): void => { errors.push({ node, code, message, hint }); };
+  const fail = (node: ts.Node, code: string, message: string, hint: string | null = null): void => { errors.push({ node, code, message, hint }); };
   const validateVariable = (name: ts.Identifier): void => {
     const inferred = checker.getTypeAtLocation(name);
     if (inferred.flags & ts.TypeFlags.Any) {
@@ -257,17 +267,17 @@ const validateSource = (entry: SourceEntry): void => {
       && ts.isVariableStatement(node.parent.parent.parent)
       && ts.isSourceFile(node.parent.parent.parent.parent);
     const classMethod = ts.isMethodDeclaration(node)
-      && Boolean(node.body)
+      && Boolean(node.body ?? null)
       && ts.isIdentifier(node.name)
       && ts.isClassDeclaration(node.parent)
-      && Boolean(node.parent.name);
-    if (!(ts.isFunctionDeclaration(node) && node.name && node.body) && !topLevelExpression && !classMethod) {
+      && Boolean(node.parent.name ?? null);
+    if (!(ts.isFunctionDeclaration(node) && (node.name ?? null) && (node.body ?? null)) && !topLevelExpression && !classMethod) {
       fail(node, "BQ2003", "the current coroutine lowering supports named async functions, top-level async arrows/function expressions, and static or instance async methods", "Move local async closures into an explicit named function until their lexical capture shapes are materialised.");
     }
   };
   const validateRuntimeName = (node: ts.Identifier): void => {
-    const symbol = checker.getSymbolAtLocation(node);
-    const declarations = symbol?.declarations ?? [];
+    const symbol = checker.getSymbolAtLocation(node) ?? null;
+    const declarations = symbol ? symbol.declarations ?? [] : [];
     const isLocal = declarations.some(declaration => !declaration.getSourceFile().isDeclarationFile);
     if (!isLocal) fail(node, "BQ1102", `${node.text} requires a JavaScript host runtime`, "Use an explicit numeric host capability or a native Wasm support routine instead.");
   };
@@ -278,7 +288,7 @@ const validateSource = (entry: SourceEntry): void => {
     if (asyncLowering === "reject" && (ts.isAwaitExpression(node) || functionHasAsyncModifier(node))) {
       fail(node, "BQ2001", "async/await lowering is disabled by this Baguette configuration", "Set asyncLowering to \"state-machine\" or rewrite the function as an explicit scheduler state machine.");
     }
-    if (ts.isYieldExpression(node) || ((ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isMethodDeclaration(node)) && Boolean(node.asteriskToken))) {
+    if (ts.isYieldExpression(node) || ((ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isMethodDeclaration(node)) && Boolean(node.asteriskToken ?? null))) {
       fail(node, "BQ2101", "generators require a resumable iterator frame that Baguette does not yet lower", "Use async/await for scheduler suspension, or write an explicit iterator state object.");
     }
     if (ts.isTryStatement(node) || ts.isThrowStatement(node)) {
@@ -290,8 +300,8 @@ const validateSource = (entry: SourceEntry): void => {
     if (isExplicitUnknown(node)) {
       fail(node, "BQ1002", "`unknown` cannot be stored or passed until its native shape is known", "Narrow the value before this declaration, or use an explicit tagged union/handle whose layout Baguette can compile.");
     }
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && !node.type) validateVariable(node.name);
-    if (ts.isParameter(node) && ts.isIdentifier(node.name) && !node.type) validateParameter(node.name);
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && !(node.type ?? null)) validateVariable(node.name);
+    if (ts.isParameter(node) && ts.isIdentifier(node.name) && !(node.type ?? null)) validateParameter(node.name);
     if (functionHasAsyncModifier(node) && asyncLowering === "state-machine") validateAsync(node);
     if (ts.isIdentifier(node) && impossibleRuntimeIdentifiers.has(node.text)) validateRuntimeName(node);
     ts.forEachChild(node, walk);
@@ -301,14 +311,17 @@ const validateSource = (entry: SourceEntry): void => {
 };
 for (const entry of sourceEntries) if (!intrinsicModules.has(entry.absolutePath)) validateSource(entry);
 
-const exported = (node: ts.Node): boolean => Boolean(ts.canHaveModifiers(node) && ts.getModifiers(node)?.some(modifier => modifier.kind === ts.SyntaxKind.ExportKeyword));
+const exported = (node: ts.Node): boolean => Boolean(ts.canHaveModifiers(node) && (ts.getModifiers(node) ?? []).some(modifier => modifier.kind === ts.SyntaxKind.ExportKeyword));
 const rawSymbolOf = (node: ts.Node): ts.Symbol | null => checker.getSymbolAtLocation(node) ?? null;
 const symbolOf = (node: ts.Node): ts.Symbol | null => {
   const symbol = rawSymbolOf(node);
   if (!symbol) return null;
   return symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
 };
-const namespaceImportSymbol = (node: ts.Identifier): boolean => Boolean(rawSymbolOf(node)?.declarations?.some(declaration => ts.isNamespaceImport(declaration)));
+const namespaceImportSymbol = (node: ts.Identifier): boolean => {
+  const symbol = rawSymbolOf(node);
+  return (symbol ? symbol.declarations ?? [] : []).some(ts.isNamespaceImport);
+};
 const abiExports = config.abi.exports ?? null;
 const explicitAbiNames = Array.isArray(abiExports) ? new Set(abiExports) : null;
 const abiSymbols = new Map<ts.Symbol, string>();
@@ -324,7 +337,7 @@ const explicitTypeName = (type: ts.TypeNode | null): string => {
 };
 const hostTypeFor = (type: ts.TypeNode | null, where: string): "number" | "bigint" | "void" => {
   const name = explicitTypeName(type);
-  const mapped = abiTypes.get(name);
+  const mapped = abiTypes.get(name) ?? null;
   if (!mapped) throw new Error(`${where}: type ${name || "<inferred>"} cannot cross the WebAssembly numeric ABI; expose a pointer or handle instead`);
   return mapped;
 };
@@ -349,14 +362,16 @@ const registerAbi = (name: ts.Identifier, parameters: readonly ts.ParameterDecla
 for (const entry of sourceEntries) {
   if (intrinsicModules.has(entry.absolutePath)) continue;
   for (const statement of entry.source.statements) {
-    if (ts.isFunctionDeclaration(statement) && statement.name && (explicitAbiNames?.has(statement.name.text) || (!explicitAbiNames && exported(statement)))) {
-      registerAbi(statement.name, statement.parameters, statement.type ?? null, entry.source);
+    const name = ts.isFunctionDeclaration(statement) ? statement.name ?? null : null;
+    if (ts.isFunctionDeclaration(statement) && name && (explicitAbiNames ? explicitAbiNames.has(name.text) : exported(statement))) {
+      registerAbi(name, statement.parameters, statement.type ?? null, entry.source);
     }
     if (!ts.isVariableStatement(statement) || !exported(statement)) continue;
       for (const declaration of statement.declarationList.declarations) {
-        if (!ts.isIdentifier(declaration.name) || !declaration.initializer || !ts.isArrowFunction(declaration.initializer)) continue;
+        const initializer = declaration.initializer ?? null;
+        if (!ts.isIdentifier(declaration.name) || !initializer || !ts.isArrowFunction(initializer)) continue;
         if (explicitAbiNames && !explicitAbiNames.has(declaration.name.text)) continue;
-        registerAbi(declaration.name, declaration.initializer.parameters, declaration.initializer.type ?? null, entry.source);
+        registerAbi(declaration.name, initializer.parameters, initializer.type ?? null, entry.source);
       }
   }
 }
@@ -377,7 +392,8 @@ const declarationNames = (statement: ts.Statement): ts.Identifier[] => {
     if (ts.isIdentifier(name)) { result.push(name); return; }
     for (const item of name.elements) if (ts.isBindingElement(item)) collectBinding(item.name);
   };
-  if ((ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement) || ts.isInterfaceDeclaration(statement) || ts.isTypeAliasDeclaration(statement) || ts.isEnumDeclaration(statement) || ts.isModuleDeclaration(statement)) && statement.name && ts.isIdentifier(statement.name)) result.push(statement.name);
+  const name = (ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement) || ts.isInterfaceDeclaration(statement) || ts.isTypeAliasDeclaration(statement) || ts.isEnumDeclaration(statement) || ts.isModuleDeclaration(statement)) ? statement.name ?? null : null;
+  if (name && ts.isIdentifier(name)) result.push(name);
   if (ts.isVariableStatement(statement)) {
     for (const declaration of statement.declarationList.declarations) collectBinding(declaration.name);
   }
@@ -396,18 +412,18 @@ for (const entry of sourceEntries) {
 }
 
 const stripExportModifiers = (modifiers: readonly ts.ModifierLike[] | null, keepExport: boolean): readonly ts.Modifier[] => {
-  const kept = modifiers?.filter((modifier): modifier is ts.Modifier => ts.isModifier(modifier) && modifier.kind !== ts.SyntaxKind.DefaultKeyword && (keepExport || modifier.kind !== ts.SyntaxKind.ExportKeyword));
+  const kept = (modifiers ?? []).filter((modifier): modifier is ts.Modifier => ts.isModifier(modifier) && modifier.kind !== ts.SyntaxKind.DefaultKeyword && (keepExport || modifier.kind !== ts.SyntaxKind.ExportKeyword));
   return kept ?? [];
 };
 const assemblyType = (type: ts.TypeNode): ts.TypeNode => {
   const name = ts.isTypeReferenceNode(type) && ts.isIdentifier(type.typeName) ? type.typeName.text : null;
   if (name === "Promise" && ts.isTypeReferenceNode(type)) {
-    const inner = type.typeArguments?.[0];
+    const inner = (type.typeArguments ?? [])[0] ?? null;
     return !inner || inner.kind === ts.SyntaxKind.VoidKeyword ? ts.factory.createTypeReferenceNode("__BqTaskVoid")
       : ts.factory.createTypeReferenceNode("__BqTask", [assemblyType(inner)]);
   }
-  const mapped = name ? typeAliases.get(name) : null;
-  if (mapped && ts.isTypeReferenceNode(type)) return ts.factory.createTypeReferenceNode(mapped, type.typeArguments?.map(assemblyType));
+  const mapped = name ? typeAliases.get(name) ?? null : null;
+  if (mapped && ts.isTypeReferenceNode(type)) return ts.factory.createTypeReferenceNode(mapped, (type.typeArguments ?? []).map(assemblyType));
   if (type.kind === ts.SyntaxKind.NumberKeyword) return ts.factory.createTypeReferenceNode("f64");
   if (type.kind === ts.SyntaxKind.BigIntKeyword) return ts.factory.createTypeReferenceNode("i64");
   if (type.kind === ts.SyntaxKind.BooleanKeyword) return ts.factory.createTypeReferenceNode("bool");
@@ -438,34 +454,34 @@ const tupleType = (type: ts.Type, location: ts.Node, depth: number): ts.TypeNode
   const nodes = elements.map(item => nativeTypeNode(item, location, depth + 1));
   if (nodes.some(item => !item)) return null;
   const printed = nodes.map(item => ts.createPrinter().printNode(ts.EmitHint.Unspecified, required(item, "item"), location.getSourceFile()));
-  if (printed.every(item => item === printed[0])) return ts.factory.createTypeReferenceNode("Array", [required(nodes[0], "nodes[0]")]);
+  if (printed.every(item => item === (printed[0] ?? null))) return ts.factory.createTypeReferenceNode("Array", [required(nodes[0] ?? null, "nodes[0]")]);
   return null;
 };
 const callableType = (signature: ts.Signature, location: ts.Node, depth: number): ts.TypeNode | null => {
   const parameters: ts.ParameterDeclaration[] = [];
   for (const parameter of signature.getParameters()) {
-    const declaration = parameter.valueDeclaration ?? parameter.declarations?.[0] ?? location;
+    const declaration = (parameter.valueDeclaration ?? null) ?? ((parameter.declarations ?? [])[0] ?? null) ?? location;
     const parameterType = nativeTypeNode(checker.getTypeOfSymbolAtLocation(parameter, declaration), declaration, depth + 1);
     if (!parameterType) return null;
-    parameters.push(ts.factory.createParameterDeclaration(undefined, undefined, parameter.getName(), undefined, parameterType, undefined));
+    parameters.push(nativeParameter(parameter.getName(), parameterType));
   }
   const result = nativeTypeNode(signature.getReturnType(), location, depth + 1);
-  return result ? ts.factory.createFunctionTypeNode(undefined, parameters, result) : null;
+  return result ? ts.factory.createFunctionTypeNode([], parameters, result) : null;
 };
 const symbolType = (symbol: ts.Symbol, type: ts.Type, location: ts.Node, depth: number): ts.TypeNode | null => {
   if (symbol.getName() === "Awaited") {
-    const arguments_ = type.aliasTypeArguments ?? (type as ts.TypeReference).typeArguments;
-    const inner = arguments_?.[0];
+    const arguments_ = type.aliasTypeArguments ?? ((type as ts.TypeReference).typeArguments ?? []);
+    const inner = arguments_[0] ?? null;
     return inner ? nativeTypeNode(inner, location, depth + 1) : null;
   }
   if (symbol.getName() === "Promise") return promiseType(type, location, depth);
-  const mapped = typeAliases.get(symbol.getName());
+  const mapped = typeAliases.get(symbol.getName()) ?? null;
   if (mapped) return ts.factory.createTypeReferenceNode(mapped);
-  const replacement = abiSymbols.get(symbol) ?? renamedSymbols.get(symbol) ?? symbol.getName();
+  const replacement = abiSymbols.get(symbol) ?? (renamedSymbols.get(symbol) ?? symbol.getName());
   if (!replacement || replacement === "__type") return null;
-  const arguments_ = type.aliasTypeArguments ?? (type as ts.TypeReference).typeArguments;
-  const typeArguments = arguments_?.map(item => nativeTypeNode(item, location, depth + 1));
-  if (typeArguments?.some(item => !item)) return null;
+  const arguments_ = type.aliasTypeArguments ?? ((type as ts.TypeReference).typeArguments ?? []);
+  const typeArguments = arguments_.map(item => nativeTypeNode(item, location, depth + 1));
+  if (typeArguments.some(item => !item)) return null;
   return typeArguments ? ts.factory.createTypeReferenceNode(replacement, typeArguments.map(item => required(item, "generic type argument"))) : ts.factory.createTypeReferenceNode(replacement);
 };
 const nullableType = (type: ts.Type, hasNullish: boolean, location: ts.Node, depth: number): ts.TypeNode | null => {
@@ -476,17 +492,17 @@ const nullableType = (type: ts.Type, hasNullish: boolean, location: ts.Node, dep
   return hasNullish && !primitive ? ts.factory.createUnionTypeNode([inner, ts.factory.createLiteralTypeNode(ts.factory.createNull())]) : inner;
 };
 const promiseType = (type: ts.Type, location: ts.Node, depth: number): ts.TypeNode | null => {
-  const inner = (type.aliasTypeArguments ?? (type as ts.TypeReference).typeArguments)?.[0];
+  const inner = (type.aliasTypeArguments ?? ((type as ts.TypeReference).typeArguments ?? []))[0] ?? null;
   if (!inner || inner.flags & ts.TypeFlags.Void) return ts.factory.createTypeReferenceNode("__BqTaskVoid");
   const innerNode = nativeTypeNode(inner, location, depth + 1);
   return innerNode ? ts.factory.createTypeReferenceNode("__BqTask", [innerNode]) : null;
 };
 const nativeTypeNode = (type: ts.Type, location: ts.Node, depth = 0): ts.TypeNode | null => {
   if (depth > 16) return null;
-  const aliasName = type.aliasSymbol?.getName();
-  const awaitedAlias = aliasName === "Awaited" ? type.aliasTypeArguments?.[0] : null;
+  const aliasName = (type.aliasSymbol ?? null) ? required(type.aliasSymbol ?? null, "type alias").getName() : null;
+  const awaitedAlias = aliasName === "Awaited" ? (type.aliasTypeArguments ?? [])[0] ?? null : null;
   if (awaitedAlias) return nativeTypeNode(awaitedAlias, location, depth + 1);
-  const aliasType = aliasName ? typeAliases.get(aliasName) : null;
+  const aliasType = aliasName ? typeAliases.get(aliasName) ?? null : null;
   if (aliasType) return ts.factory.createTypeReferenceNode(aliasType);
   const flags = type.flags;
   if (flags & ts.TypeFlags.Any || flags & ts.TypeFlags.Unknown) return null;
@@ -497,19 +513,19 @@ const nativeTypeNode = (type: ts.Type, location: ts.Node, depth = 0): ts.TypeNod
   if (flags & ts.TypeFlags.Void) return ts.factory.createKeywordTypeNode(ts.SyntaxKind.VoidKeyword);
   if (flags & ts.TypeFlags.Never) return ts.factory.createKeywordTypeNode(ts.SyntaxKind.VoidKeyword);
   if (flags & ts.TypeFlags.TypeParameter) {
-    const symbol = type.getSymbol();
+    const symbol = type.getSymbol() ?? null;
     return symbol ? ts.factory.createTypeReferenceNode(symbol.getName()) : null;
   }
   if (type.isUnion()) return unionType(type, location, depth);
   if (checker.isTupleType(type)) return tupleType(type, location, depth);
   if (checker.isArrayType(type)) {
-    const element = checker.getTypeArguments(type as ts.TypeReference)[0];
+    const element = checker.getTypeArguments(type as ts.TypeReference)[0] ?? null;
     const elementNode = element ? nativeTypeNode(element, location, depth + 1) : null;
     return elementNode ? ts.factory.createTypeReferenceNode("Array", [elementNode]) : null;
   }
   const signatures = checker.getSignaturesOfType(type, ts.SignatureKind.Call);
-  if (signatures.length === 1) return callableType(required(signatures[0], "signatures[0]"), location, depth);
-  const symbol = type.aliasSymbol ?? type.getSymbol();
+  if (signatures.length === 1) return callableType(required(signatures[0] ?? null, "signatures[0]"), location, depth);
+  const symbol = type.aliasSymbol ?? (type.getSymbol() ?? null);
   if (symbol) return symbolType(symbol, type, location, depth);
   return null;
 };
@@ -520,15 +536,13 @@ const declaredTypeOfSymbol = (symbol: ts.Symbol | null, seen = new Set<ts.Symbol
   const nextSeen = new Set(seen);
   nextSeen.add(target);
   for (const declaration of target.declarations ?? []) {
-    if ((ts.isVariableDeclaration(declaration) || ts.isParameter(declaration) || ts.isPropertyDeclaration(declaration) || ts.isPropertySignature(declaration)) && declaration.type) {
-      return assemblyType(declaration.type);
-    }
-    const inferred = (ts.isVariableDeclaration(declaration) || ts.isPropertyDeclaration(declaration)) && declaration.initializer
-      ? syntacticTypeOfExpression(declaration.initializer, nextSeen) : null;
+    const declared = (ts.isVariableDeclaration(declaration) || ts.isParameter(declaration) || ts.isPropertyDeclaration(declaration) || ts.isPropertySignature(declaration)) ? declaration.type ?? null : null;
+    if (declared) return assemblyType(declared);
+    const initializer = (ts.isVariableDeclaration(declaration) || ts.isPropertyDeclaration(declaration)) ? declaration.initializer ?? null : null;
+    const inferred = initializer ? syntacticTypeOfExpression(initializer, nextSeen) : null;
     if (inferred) return inferred;
-    if ((ts.isFunctionDeclaration(declaration) || ts.isMethodDeclaration(declaration) || ts.isMethodSignature(declaration) || ts.isGetAccessorDeclaration(declaration)) && declaration.type) {
-      return assemblyType(declaration.type);
-    }
+    const result = (ts.isFunctionDeclaration(declaration) || ts.isMethodDeclaration(declaration) || ts.isMethodSignature(declaration) || ts.isGetAccessorDeclaration(declaration)) ? declaration.type ?? null : null;
+    if (result) return assemblyType(result);
   }
   return null;
 };
@@ -550,9 +564,9 @@ const numericConstantExpression = (node: ts.Expression): boolean => {
   return false;
 };
 const callExpressionType = (expression: ts.CallExpression | ts.NewExpression): ts.TypeNode | null => {
-  const signature = checker.getResolvedSignature(expression);
-  const declaration = signature?.declaration;
-  const declarationType = declaration && "type" in declaration ? declaration.type : null;
+  const signature = checker.getResolvedSignature(expression) ?? null;
+  const declaration = signature ? signature.declaration ?? null : null;
+  const declarationType = declaration && "type" in declaration ? declaration.type ?? null : null;
   if (declarationType && ts.isTypeNode(declarationType) && ts.isTypeReferenceNode(declarationType) && ts.isIdentifier(declarationType.typeName) && typeAliases.has(declarationType.typeName.text)) {
     return assemblyType(declarationType);
   }
@@ -609,25 +623,28 @@ const returnedFromTypedFunction = (node: ts.Node): ts.TypeNode | null => {
   let current: ts.Node | null = node;
   while (current && !ts.isFunctionLike(current)) current = current.parent ?? null;
   if (!current || !(ts.isFunctionDeclaration(current) || ts.isMethodDeclaration(current) || ts.isFunctionExpression(current) || ts.isArrowFunction(current) || ts.isGetAccessorDeclaration(current) || ts.isSetAccessorDeclaration(current))) return null;
-  if (!current.type || !ts.isTypeNode(current.type) || !current.body) return null;
+  const type = current.type ?? null;
+  const body = current.body ?? null;
+  if (!type || !ts.isTypeNode(type) || !body) return null;
   let returned = false;
   const walk = (candidate: ts.Node): void => {
     if (returned) return;
     if (candidate !== current && ts.isFunctionLike(candidate)) return;
-    if (ts.isReturnStatement(candidate) && candidate.expression) {
-      let expression: ts.Expression = candidate.expression;
+    const value = ts.isReturnStatement(candidate) ? candidate.expression ?? null : null;
+    if (value) {
+      let expression: ts.Expression = value;
       while (ts.isParenthesizedExpression(expression) || ts.isNonNullExpression(expression) || ts.isAsExpression(expression) || ts.isTypeAssertionExpression(expression)) expression = expression.expression;
       returned = ts.isIdentifier(expression) && symbolOf(expression) === symbol;
     }
     ts.forEachChild(candidate, walk);
   };
-  walk(current.body);
+  walk(body);
   if (!returned) return null;
-  if (functionHasAsyncModifier(current) && ts.isTypeReferenceNode(current.type) && ts.isIdentifier(current.type.typeName) && current.type.typeName.text === "Promise") {
-    const inner = current.type.typeArguments?.[0];
+  if (functionHasAsyncModifier(current) && ts.isTypeReferenceNode(type) && ts.isIdentifier(type.typeName) && type.typeName.text === "Promise") {
+    const inner = (type.typeArguments ?? [])[0] ?? null;
     return inner ? assemblyType(inner) : ts.factory.createKeywordTypeNode(ts.SyntaxKind.VoidKeyword);
   }
-  return assemblyType(current.type);
+  return assemblyType(type);
 };
 const inferredTypeFor = (node: ts.Node, initializer: ts.Expression | null = null): ts.TypeNode | null => {
   if (!materialiseInferredTypes) return null;
@@ -637,9 +654,9 @@ const inferredReturnTypeFor = (node: ts.SignatureDeclaration): ts.TypeNode | nul
   if (!materialiseInferredTypes) return null;
   const fromBody = (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) && !ts.isBlock(node.body) ? syntacticTypeOfExpression(node.body) : null;
   if (fromBody) return fromBody;
-  const signature = checker.getSignatureFromDeclaration(node);
-  const declaration = signature?.declaration;
-  const declarationType = declaration && "type" in declaration ? declaration.type : null;
+  const signature = checker.getSignatureFromDeclaration(node) ?? null;
+  const declaration = signature ? signature.declaration ?? null : null;
+  const declarationType = declaration && "type" in declaration ? declaration.type ?? null : null;
   return declarationType && ts.isTypeNode(declarationType) ? assemblyType(declarationType) : signature ? nativeTypeNode(signature.getReturnType(), node) : null;
 };
 
