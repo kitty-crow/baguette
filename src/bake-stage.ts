@@ -4,6 +4,7 @@ import * as fs from "node:fs/promises";
 import * as pathHost from "node:path";
 import * as urlHost from "node:url";
 import * as childProcess from "node:child_process";
+import { pathExists } from "./host.ts";
 import ts from "typescript";
 import { assertCanonicalThistleSource } from "./source-contract.ts";
 
@@ -30,14 +31,6 @@ function setConfigArg(value: string): void {
   processHost.argv.push("--config", value);
 }
 
-async function exists(path: string): Promise<boolean> {
-  try {
-    await fs.access(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 async function writeJson(path: string, value: JsonObject | BaguetteConfig): Promise<void> {
   await fs.mkdir(pathHost.dirname(path), { recursive: true });
@@ -134,10 +127,10 @@ const moduleDir = pathHost.dirname(urlHost.fileURLToPath(import.meta.url));
 const bakeRoot = pathHost.resolve(moduleDir, "../vendor/bake");
 const bakeProject = pathHost.join(bakeRoot, "tsconfig.json");
 const bakeCli = pathHost.join(bakeRoot, "dist/cli.js");
-if (!await exists(bakeProject)) {
+if (!await pathExists(bakeProject)) {
   throw new Error("Baguette's Bake submodule is missing; run git submodule update --init --recursive");
 }
-if (!await exists(bakeCli)) {
+if (!await pathExists(bakeCli)) {
   const typescriptFile = urlHost.fileURLToPath(import.meta.resolve("typescript"));
   const tscFile = pathHost.join(pathHost.dirname(typescriptFile), "tsc.js");
   await run([processHost.execPath, tscFile, "-p", bakeProject], bakeRoot, "Bake build");

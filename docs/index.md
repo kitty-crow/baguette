@@ -9,3 +9,4 @@
 - [contracts](modules/contracts.md)
 - [test/source-contract.test](modules/test/source-contract.test.md)
 - [test/wat-modules.test](modules/test/wat-modules.test.md)
+- [Host filesystem access](modules/host.md)

@@ -1,6 +1,6 @@
 import processHost from "node:process";
 import * as childProcess from "node:child_process";
-import * as fs from "node:fs/promises";
+import { pathExists } from "./host.ts";
 import * as urlHost from "node:url";
 import { required } from "./required.ts";
 /**
@@ -26,9 +26,6 @@ const run = (command: string[], label: string): void => {
   const exitCode = childProcess.spawnSync(required(command[0], "command executable"), command.slice(1), { cwd: processHost.cwd(), env: processHost.env, stdio: "inherit" }).status ?? 1;
   if (exitCode !== 0) throw new Error(`${label} failed with exit code ${exitCode}`);
 };
-const exists = async (path: string): Promise<boolean> => {
-  try { await fs.access(path); return true; } catch { return false; }
-};
 
 if (testCli || testWeb) {
   console.log("Baguette: building the Thistle host and static browser assets first");
@@ -43,8 +40,8 @@ run(compilerCommand, "Baguette compiler");
 
 if (validateOnly) processHost.exit(0);
 
-const webBuildExists = await exists("dist/web/index.html");
-const webPreparerExists = await exists("build/tool/teto-web.js");
+const webBuildExists = await pathExists("dist/web/index.html");
+const webPreparerExists = await pathExists("build/tool/teto-web.js");
 if (!alternateConfig && webBuildExists && webPreparerExists) {
   run(["node", "build/tool/teto-web.js"], "Teto web preparation");
 } else {

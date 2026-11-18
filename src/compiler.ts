@@ -59,6 +59,7 @@ const emitModularWat = hasOption("--emit-modular-wat");
 const configPath = pathHost.resolve(root, optionValue("--config") ?? "baguette.config.json");
 const configRoot = pathHost.dirname(configPath);
 
+/** Retry only timed-out backend jobs; a normal nonzero exit indicates a compiler fault, not a transient timeout. */
 const run = async (command: string[], label: string, attempts = 1, timeoutMs = 240_000): Promise<BunResult> => {
   if (!command[0]) throw new Error(`${label} has no executable`);
   let lastExit = -1;
@@ -98,7 +99,7 @@ const lineAndColumn = (source: ts.SourceFile, position: number): string => {
 };
 const diagnosticText = (diagnostic: ts.Diagnostic): string => {
   const message = ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n");
-  if (!diagnostic.file || diagnostic.start === undefined) return message;
+  if (!diagnostic.file || diagnostic.start == null) return message;
   return `${lineAndColumn(diagnostic.file, diagnostic.start)}: ${message}`;
 };
 const config: BaguetteConfig = parseConfig(await readText(configPath));
@@ -148,11 +149,11 @@ for (const source of program.getSourceFiles()) {
 }
 for (const entry of entryPaths) if (!sourceByAbsolute.has(entry)) throw new Error(`Baguette could not load entry ${relative(entry)}`);
 
-const resolveDependency = (source: ts.SourceFile, specifier: string): string | undefined => {
+const resolveDependency = (source: ts.SourceFile, specifier: string): string | null => {
   const result = ts.resolveModuleName(specifier, source.fileName, compilerOptions, ts.sys).resolvedModule;
-  if (!result || result.isExternalLibraryImport) return undefined;
+  if (!result || result.isExternalLibraryImport) return null;
   const resolved = pathHost.normalize(pathHost.resolve(result.resolvedFileName.replace(/\.d\.ts$/, ".ts")));
-  return sourceByAbsolute.has(resolved) ? resolved : undefined;
+  return sourceByAbsolute.has(resolved) ? resolved : null;
 };
 const dependencies = new Map<string, string[]>();
 const unresolvedRuntimeImports: string[] = [];
@@ -307,7 +308,8 @@ const symbolOf = (node: ts.Node): ts.Symbol | undefined => {
   return symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
 };
 const namespaceImportSymbol = (node: ts.Identifier): boolean => Boolean(rawSymbolOf(node)?.declarations?.some(declaration => ts.isNamespaceImport(declaration)));
-const explicitAbiNames = config.abi?.exports === undefined || config.abi.exports === "all-exported-functions" ? undefined : new Set(config.abi.exports);
+const abiExports = config.abi?.exports ?? null;
+const explicitAbiNames = Array.isArray(abiExports) ? new Set(abiExports) : null;
 const abiSymbols = new Map<ts.Symbol, string>();
 const abiFunctions: AbiFunction[] = [];
 const explicitTypeName = (type: ts.TypeNode | undefined): string => {
@@ -1184,9 +1186,9 @@ const lowerSource = (entry: SourceEntry): string => {
         ]);
       };
 
-      const compileNestedExpressionAwait = (statement: ts.Statement, next: number, loop?: LoopTargets): number | undefined => {
+      const compileNestedExpressionAwait = (statement: ts.Statement, next: number, loop?: LoopTargets): number | null => {
         const awaitExpression = firstAwaitIn(statement);
-        if (!awaitExpression) return undefined;
+        if (!awaitExpression) return null;
         assertAwaitEvaluationOrder(awaitExpression, statement);
         const awaited = awaitResult(awaitExpression);
         if (awaited.isVoid) {
@@ -1409,8 +1411,8 @@ const lowerSource = (entry: SourceEntry): string => {
         if (ts.isBlock(statement)) return compileSequence(statement.statements, next, loop);
         if (ts.isEmptyStatement(statement)) return next;
         const nested = (ts.isExpressionStatement(statement) || ts.isReturnStatement(statement) || ts.isVariableStatement(statement)) && containsNestedAwait(statement)
-          ? compileNestedExpressionAwait(statement, next, loop) : undefined;
-        if (nested !== undefined) return nested;
+          ? compileNestedExpressionAwait(statement, next, loop) : null;
+        if (nested !== null) return nested;
         if (ts.isReturnStatement(statement)) {
           const body = result.isVoid
             ? [...resolveAndReturn(statement.expression).statements]
@@ -1692,7 +1694,7 @@ const verifyFunction = (native: Record<string, WebAssembly.ExportValue>, wasmPat
   const fn = native[name];
   if (typeof fn !== "function") throw new Error(`${relative(wasmPath)} lacks verification function ${name}`);
   const result = (fn as CallableFunction)(...(args ?? []).map(argumentValue));
-  if (expected !== undefined && result !== argumentValue(expected)) throw new Error(`${relative(wasmPath)} ${name} returned ${String(result)}`);
+  if (expected != null && result !== argumentValue(expected)) throw new Error(`${relative(wasmPath)} ${name} returned ${String(result)}`);
 };
 const verifyModule = async (wasmPath: string, threaded: boolean): Promise<Omit<VariantResult, "file" | "bytes" | "sha256" | "threaded">> => {
   // Inspect the actual native module before instantiating it with the declared host capabilities.
