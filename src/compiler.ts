@@ -500,6 +500,7 @@ const promiseType = (type: ts.Type, location: ts.Node, depth: number): ts.TypeNo
 };
 // Materialise only AssemblyScript storage representations. Alias resolution precedes primitive widening; nullable references and callable types require structural conversion. A depth bound prevents recursive type expansion.
 const nativeTypeNode = (type: ts.Type, location: ts.Node, depth = 0): ts.TypeNode | null => {
+  // Resolve aliases before primitives to preserve explicit native widths; cap recursive expansion before inspecting structural types.
   if (depth > 16) return null;
   const aliasName = (type.aliasSymbol ?? null) ? required(type.aliasSymbol ?? null, "type alias").getName() : null;
   const awaitedAlias = aliasName === "Awaited" ? (type.aliasTypeArguments ?? [])[0] ?? null : null;
@@ -683,6 +684,7 @@ for (const entry of sourceEntries) {
   };
   // Instance coroutine frames carry the enclosing class's generic parameters and a receiver; static methods need neither receiver nor class parameters.
   const collectMethod = (node: ts.MethodDeclaration, name: ts.Identifier, body: ts.Block): void => {
+    // Static frames omit the instance receiver and class type parameters; instance frames must retain both to resume correctly.
     if (!ts.isClassDeclaration(node.parent)) return;
     const parentName = node.parent.name ?? null;
     if (!parentName) return;
