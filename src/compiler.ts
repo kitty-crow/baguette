@@ -1607,7 +1607,7 @@ const lowerSource = (entry: SourceEntry): string => {
         asyncSupportStatements.push(...lowered.support);
         return lowered.wrapper;
       }
-      if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression) && namespaceImportSymbol(node.expression)) {
+      if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.name) && ts.isIdentifier(node.expression) && namespaceImportSymbol(node.expression)) {
         return namespaceName(node.name, node, "member");
       }
       if (ts.isQualifiedName(node) && ts.isIdentifier(node.left) && namespaceImportSymbol(node.left)) {
