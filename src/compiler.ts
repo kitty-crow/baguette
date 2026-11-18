@@ -906,17 +906,17 @@ const lowerSource = (entry: SourceEntry): string => {
         readonly kind: AsyncAwaitKind;
         readonly target?: ts.Expression | ts.Identifier | undefined;
       }
-      const variableAwaitSyntax = (statement: ts.VariableStatement): AwaitSyntax | undefined => {
+      const variableAwaitSyntax = (statement: ts.VariableStatement): AwaitSyntax | null => {
         const awaitedDeclarations = statement.declarationList.declarations.filter(item => Boolean(item.initializer && ts.isAwaitExpression(item.initializer)));
-        if (!awaitedDeclarations.length) return undefined;
+        if (!awaitedDeclarations.length) return null;
         if (statement.declarationList.declarations.length !== 1 || awaitedDeclarations.length !== 1) {
           throw new Error(`${lineAndColumn(source, statement.getStart(source))}: BQ2014: an awaited variable declaration must be the only declaration in its statement`);
         }
         const declaration = required(awaitedDeclarations[0], "awaitedDeclarations[0]");
-        if (!ts.isIdentifier(declaration.name) || !declaration.initializer || !ts.isAwaitExpression(declaration.initializer)) return undefined;
+        if (!ts.isIdentifier(declaration.name) || !declaration.initializer || !ts.isAwaitExpression(declaration.initializer)) return null;
         return { awaitExpression: declaration.initializer, kind: "variable", target: declaration.name };
       };
-      const awaitSyntax = (statement: ts.Statement): AwaitSyntax | undefined => {
+      const awaitSyntax = (statement: ts.Statement): AwaitSyntax | null => {
         if (ts.isExpressionStatement(statement) && ts.isAwaitExpression(statement.expression)) return { awaitExpression: statement.expression, kind: "expression" };
         if (ts.isExpressionStatement(statement) && ts.isBinaryExpression(statement.expression)
           && statement.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isAwaitExpression(statement.expression.right))
@@ -924,11 +924,11 @@ const lowerSource = (entry: SourceEntry): string => {
         if (ts.isVariableStatement(statement)) return variableAwaitSyntax(statement);
         if (ts.isReturnStatement(statement) && statement.expression && ts.isAwaitExpression(statement.expression))
           return { awaitExpression: statement.expression, kind: "return" };
-        return undefined;
+        return null;
       };
-      const classifyAwait = (statement: ts.Statement): AsyncAwaitPoint | undefined => {
+      const classifyAwait = (statement: ts.Statement): AsyncAwaitPoint | null => {
         const syntax = awaitSyntax(statement);
-        if (!syntax) return undefined;
+        if (!syntax) return null;
         const { awaitExpression, kind, target } = syntax;
         const awaited = awaitResult(awaitExpression);
         const point: AsyncAwaitPoint = {
@@ -944,7 +944,7 @@ const lowerSource = (entry: SourceEntry): string => {
       };
       const collectAwaitPoints = (current: ts.Node): void => {
         if (ts.isFunctionLike(current) && current !== node) return;
-        const point = ts.isStatement(current) ? classifyAwait(current) : undefined;
+        const point = ts.isStatement(current) ? classifyAwait(current) : null;
         if (point && ts.isStatement(current)) awaitPoints.set(current, point);
         ts.forEachChild(current, collectAwaitPoints);
       };
@@ -982,7 +982,7 @@ const lowerSource = (entry: SourceEntry): string => {
         if (ts.isPrivateIdentifier(current)) {
           throw new Error(`${lineAndColumn(source, current.getStart(source))}: BQ2034: ECMAScript private fields cannot be accessed from a native coroutine resume function\n  hint: Use a TypeScript private/protected field or explicit accessor method.`);
         }
-        const symbol = ts.isShorthandPropertyAssignment(current) ? symbolOf(current.name) : ts.isIdentifier(current) ? symbolOf(current) : undefined;
+        const symbol = ts.isShorthandPropertyAssignment(current) ? symbolOf(current.name) : ts.isIdentifier(current) ? symbolOf(current) : null;
         const binding = symbol && frameBindings.get(symbol);
         if (binding && ts.isShorthandPropertyAssignment(current)) return ts.factory.createPropertyAssignment(current.name.text, bindingAccess(binding));
         if (binding && ts.isIdentifier(current)) return bindingAccess(binding);
@@ -992,8 +992,8 @@ const lowerSource = (entry: SourceEntry): string => {
         const framed = ts.visitNode(current, frameReferenceVisitor) as T;
         return ts.visitNode(framed, visit) as T;
       };
-      const firstAwaitIn = (root: ts.Node): ts.AwaitExpression | undefined => {
-        let found: ts.AwaitExpression | undefined;
+      const firstAwaitIn = (root: ts.Node): ts.AwaitExpression | null => {
+        let found: ts.AwaitExpression | null = null;
         const scan = (current: ts.Node): void => {
           if (found) return;
           if (ts.isFunctionLike(current) && current !== root) return;
@@ -1055,7 +1055,7 @@ const lowerSource = (entry: SourceEntry): string => {
           }
         }
       };
-      const resolveAndReturn = (expression?: ts.Expression): ts.Block => {
+      const resolveAndReturn = (expression: ts.Expression | null = null): ts.Block => {
         const args = expression ? [rewrite(expression)] : [];
         return ts.factory.createBlock([
           ts.factory.createExpressionStatement(ts.factory.createCallExpression(ts.factory.createPropertyAccessExpression(taskAccess(), "__bq_resolve"), undefined, args)),
@@ -1065,7 +1065,7 @@ const lowerSource = (entry: SourceEntry): string => {
       const rewriteReturnsVisitor: ts.Visitor = current => {
         if (ts.isFunctionLike(current)) return current;
         if (ts.isReturnStatement(current) && !result.isVoid && !current.expression) throw new Error(`${lineAndColumn(source, current.getStart(source))}: BQ2011: non-void async return requires a value`);
-        if (ts.isReturnStatement(current)) return resolveAndReturn(current.expression);
+        if (ts.isReturnStatement(current)) return resolveAndReturn(current.expression ?? null);
         return ts.visitEachChild(current, rewriteReturnsVisitor, context);
       };
       const requiredFrameBinding = (name: ts.Identifier, description: string): AsyncFrameBinding => {
@@ -1096,7 +1096,7 @@ const lowerSource = (entry: SourceEntry): string => {
             if (element.dotDotDotToken || element.initializer) {
               throw new Error(`${lineAndColumn(source, element.getStart(source))}: BQ2021: destructuring defaults and rest bindings need dedicated native lowering\n  hint: Split this binding into explicit property assignments.`);
             }
-            const property = element.propertyName ?? (ts.isIdentifier(element.name) ? element.name : undefined);
+            const property = element.propertyName ?? (ts.isIdentifier(element.name) ? element.name : null);
             if (!property || ts.isComputedPropertyName(property)) {
               throw new Error(`${lineAndColumn(source, element.getStart(source))}: BQ2022: computed destructuring keys have no fixed native field offset\n  hint: Use a statically named property or an explicit map lookup.`);
             }
@@ -1115,7 +1115,7 @@ const lowerSource = (entry: SourceEntry): string => {
           const rewrittenInitializer = rewrite(declaration.initializer);
           const initializerType = declaration.initializer.pos >= 0
             ? nativeTypeNode(checker.getTypeAtLocation(declaration.initializer), declaration.initializer)
-            : undefined;
+            : null;
           if (!initializerType && literalOrStaticReference(rewrittenInitializer)) {
             lowerBindingAssignment(declaration.name, rewrittenInitializer);
             continue;
@@ -1142,7 +1142,7 @@ const lowerSource = (entry: SourceEntry): string => {
       const consumeAwait = (point: AsyncAwaitPoint): ts.Statement[] => {
         const resumed = ts.factory.createCallExpression(ts.factory.createPropertyAccessExpression(awaitTaskAccess(point), "__bq_resume"), undefined, []);
         if (point.kind === "expression") return [ts.factory.createExpressionStatement(resumed)];
-        if (point.kind === "return") return [resolveAndReturn(point.resultVoid ? undefined : resumed)];
+        if (point.kind === "return") return [resolveAndReturn(point.resultVoid ? null : resumed)];
         if (point.kind === "variable" && point.target && ts.isIdentifier(point.target)) {
           const binding = requiredFrameBinding(point.target, "coroutine local");
           return [ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(bindingAccess(binding), ts.SyntaxKind.EqualsToken, resumed))];
@@ -1168,7 +1168,7 @@ const lowerSource = (entry: SourceEntry): string => {
         ts.factory.createContinueStatement(),
       ];
       const completionState = allocateState(result.isVoid ? [...resolveAndReturn().statements] : [ts.factory.createReturnStatement()]);
-      interface LoopTargets { readonly breakState: number; readonly continueState?: number | undefined; }
+      interface LoopTargets { readonly breakState: number; readonly continueState?: number; }
 
       const compileAwait = (point: AsyncAwaitPoint, next: number): number => {
         const resumeBody = consumeAwait(point);
@@ -1275,7 +1275,7 @@ const lowerSource = (entry: SourceEntry): string => {
         return allocateState(setStateAndContinue(loop.breakState));
       };
       const compileContinue = (statement: ts.ContinueStatement, loop?: LoopTargets): number => {
-        if (!loop || loop.continueState === undefined) throw new Error(`${lineAndColumn(source, statement.getStart(source))}: BQ2016: continue is not inside a lowered loop`);
+        if (!loop || loop.continueState == null) throw new Error(`${lineAndColumn(source, statement.getStart(source))}: BQ2016: continue is not inside a lowered loop`);
         return allocateState(setStateAndContinue(loop.continueState));
       };
       const compileSwitch = (statement: ts.SwitchStatement, next: number, loop?: LoopTargets): number => {
@@ -1363,7 +1363,7 @@ const lowerSource = (entry: SourceEntry): string => {
             if (element.dotDotDotToken || element.initializer) {
               throw new Error(`${lineAndColumn(source, element.getStart(source))}: BQ2027: for-of destructuring defaults and rest require explicit native assignments`);
             }
-            const property = element.propertyName ?? (ts.isIdentifier(element.name) ? element.name : undefined);
+            const property = element.propertyName ?? (ts.isIdentifier(element.name) ? element.name : null);
             if (!property || ts.isComputedPropertyName(property)) {
               throw new Error(`${lineAndColumn(source, element.getStart(source))}: BQ2022: computed destructuring keys have no fixed native field offset`);
             }
@@ -1548,7 +1548,7 @@ const lowerSource = (entry: SourceEntry): string => {
         const lowered = lowerAsyncFunction(findAsyncUnit(node.name, node, "function"));
         return [...lowered.support, lowered.wrapper];
       }
-      const declaration = ts.isVariableStatement(node) && node.declarationList.declarations.length === 1 ? node.declarationList.declarations[0] : undefined;
+      const declaration = ts.isVariableStatement(node) && node.declarationList.declarations.length === 1 ? node.declarationList.declarations[0] ?? null : null;
       if (declaration && ts.isIdentifier(declaration.name) && declaration.initializer
         && (ts.isArrowFunction(declaration.initializer) || ts.isFunctionExpression(declaration.initializer))
         && functionHasAsyncModifier(declaration.initializer) && asyncLowering === "state-machine") {
@@ -1566,7 +1566,7 @@ const lowerSource = (entry: SourceEntry): string => {
       if (ts.isQualifiedName(node) && ts.isIdentifier(node.left) && namespaceImportSymbol(node.left)) {
         return namespaceName(node.right, node, "type");
       }
-      const overloadSymbol = (ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) && !node.body && node.name ? symbolOf(node.name) : undefined;
+      const overloadSymbol = (ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) && !node.body && node.name ? symbolOf(node.name) : null;
       const hasImplementation = overloadSymbol?.declarations?.some(declaration =>
         (ts.isFunctionDeclaration(node) && ts.isFunctionDeclaration(declaration) || ts.isMethodDeclaration(node) && ts.isMethodDeclaration(declaration)) && Boolean(declaration.body));
       if (hasImplementation) return undefined;
@@ -1598,7 +1598,7 @@ const lowerSource = (entry: SourceEntry): string => {
         const replacement = flattenedName(node);
         return replacement && replacement !== node.text ? ts.factory.createIdentifier(replacement) : node;
       }
-      const shorthand = ts.isShorthandPropertyAssignment(node) ? flattenedName(node.name) : undefined;
+      const shorthand = ts.isShorthandPropertyAssignment(node) ? flattenedName(node.name) : null;
       if (shorthand && ts.isShorthandPropertyAssignment(node) && shorthand !== node.name.text) return ts.factory.createPropertyAssignment(node.name.text, ts.factory.createIdentifier(shorthand));
       if (ts.isTypeReferenceNode(node) || node.kind === ts.SyntaxKind.NumberKeyword || node.kind === ts.SyntaxKind.BigIntKeyword || node.kind === ts.SyntaxKind.BooleanKeyword) return ts.visitEachChild(assemblyType(node as ts.TypeNode), visit, context);
       if (ts.isBigIntLiteral(node)) {
@@ -1659,11 +1659,11 @@ const tsVersion = ts.version;
 const binaryenVersion = await compilerVersion(`${root}/node_modules/binaryen/package.json`);
 const generatedBody = [asyncRuntimeSource, ...sourceEntries.map(lowerSource)].filter(Boolean).join("\n\n");
 const customPrelude = config.preludeFile ? await readText(normalise(config.preludeFile)) : "";
-const variantPreludes = new Map<string, { path: string | undefined; text: string; sha256: string }>();
+const variantPreludes = new Map<string, { path: string | null; text: string; sha256: string }>();
 for (const variant of variants) {
-  const preludePath = variant.preludeFile ? normalise(variant.preludeFile) : undefined;
+  const preludePath = variant.preludeFile ? normalise(variant.preludeFile) : null;
   const text = preludePath ? await readText(preludePath) : "";
-  variantPreludes.set(variant.name, { path: preludePath ? relative(preludePath) : undefined, text, sha256: await sha256(encoder.encode(text)) });
+  variantPreludes.set(variant.name, { path: preludePath ? relative(preludePath) : null, text, sha256: await sha256(encoder.encode(text)) });
 }
 const sourceHash = await sha256(encoder.encode(sourceEntries.map(entry => `${entry.path}\n${entry.text}`).join("\n")));
 const loweredSourceHashes = Object.fromEntries(await Promise.all(variants.map(async variant => {
