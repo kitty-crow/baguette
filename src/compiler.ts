@@ -301,10 +301,10 @@ const validateSource = (entry: SourceEntry): void => {
 for (const entry of sourceEntries) if (!intrinsicModules.has(entry.absolutePath)) validateSource(entry);
 
 const exported = (node: ts.Node): boolean => Boolean(ts.canHaveModifiers(node) && ts.getModifiers(node)?.some(modifier => modifier.kind === ts.SyntaxKind.ExportKeyword));
-const rawSymbolOf = (node: ts.Node): ts.Symbol | undefined => checker.getSymbolAtLocation(node);
-const symbolOf = (node: ts.Node): ts.Symbol | undefined => {
+const rawSymbolOf = (node: ts.Node): ts.Symbol | null => checker.getSymbolAtLocation(node) ?? null;
+const symbolOf = (node: ts.Node): ts.Symbol | null => {
   const symbol = rawSymbolOf(node);
-  if (!symbol) return undefined;
+  if (!symbol) return null;
   return symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
 };
 const namespaceImportSymbol = (node: ts.Identifier): boolean => Boolean(rawSymbolOf(node)?.declarations?.some(declaration => ts.isNamespaceImport(declaration)));
@@ -312,7 +312,7 @@ const abiExports = config.abi?.exports ?? null;
 const explicitAbiNames = Array.isArray(abiExports) ? new Set(abiExports) : null;
 const abiSymbols = new Map<ts.Symbol, string>();
 const abiFunctions: AbiFunction[] = [];
-const explicitTypeName = (type: ts.TypeNode | undefined): string => {
+const explicitTypeName = (type: ts.TypeNode | null): string => {
   if (!type) return "";
   if (ts.isTypeReferenceNode(type) && ts.isIdentifier(type.typeName)) return type.typeName.text;
   if (type.kind === ts.SyntaxKind.NumberKeyword) return "number";
@@ -321,13 +321,13 @@ const explicitTypeName = (type: ts.TypeNode | undefined): string => {
   if (type.kind === ts.SyntaxKind.VoidKeyword) return "void";
   return type.getText(type.getSourceFile());
 };
-const hostTypeFor = (type: ts.TypeNode | undefined, where: string): "number" | "bigint" | "void" => {
+const hostTypeFor = (type: ts.TypeNode | null, where: string): "number" | "bigint" | "void" => {
   const name = explicitTypeName(type);
   const mapped = abiTypes.get(name);
   if (!mapped) throw new Error(`${where}: type ${name || "<inferred>"} cannot cross the WebAssembly numeric ABI; expose a pointer or handle instead`);
   return mapped;
 };
-const registerAbi = (name: ts.Identifier, parameters: readonly ts.ParameterDeclaration[], result: ts.TypeNode | undefined, source: ts.SourceFile): void => {
+const registerAbi = (name: ts.Identifier, parameters: readonly ts.ParameterDeclaration[], result: ts.TypeNode | null, source: ts.SourceFile): void => {
   const symbol = symbolOf(name);
   if (!symbol) throw new Error(`${lineAndColumn(source, name.getStart(source))}: cannot resolve ABI symbol ${name.text}`);
   const exportName = name.text;
@@ -338,8 +338,8 @@ const registerAbi = (name: ts.Identifier, parameters: readonly ts.ParameterDecla
     sourceName: `${relative(source.fileName)}#${name.text}`,
     parameters: parameters.map(parameter => ({
       name: ts.isIdentifier(parameter.name) ? parameter.name.text : parameter.name.getText(source),
-      sourceType: explicitTypeName(parameter.type),
-      hostType: hostTypeFor(parameter.type, `${relative(source.fileName)}:${name.text}`),
+      sourceType: explicitTypeName(parameter.type ?? null),
+      hostType: hostTypeFor(parameter.type ?? null, `${relative(source.fileName)}:${name.text}`),
     })),
     resultSourceType: explicitTypeName(result),
     resultHostType: hostTypeFor(result, `${relative(source.fileName)}:${name.text} return`),
@@ -349,13 +349,13 @@ for (const entry of sourceEntries) {
   if (intrinsicModules.has(entry.absolutePath)) continue;
   for (const statement of entry.source.statements) {
     if (ts.isFunctionDeclaration(statement) && statement.name && (explicitAbiNames?.has(statement.name.text) || (!explicitAbiNames && exported(statement)))) {
-      registerAbi(statement.name, statement.parameters, statement.type, entry.source);
+      registerAbi(statement.name, statement.parameters, statement.type ?? null, entry.source);
     }
     if (!ts.isVariableStatement(statement) || !exported(statement)) continue;
       for (const declaration of statement.declarationList.declarations) {
         if (!ts.isIdentifier(declaration.name) || !declaration.initializer || !ts.isArrowFunction(declaration.initializer)) continue;
         if (explicitAbiNames && !explicitAbiNames.has(declaration.name.text)) continue;
-        registerAbi(declaration.name, declaration.initializer.parameters, declaration.initializer.type, entry.source);
+        registerAbi(declaration.name, declaration.initializer.parameters, declaration.initializer.type ?? null, entry.source);
       }
   }
 }
@@ -394,22 +394,22 @@ for (const entry of sourceEntries) {
   }
 }
 
-const stripExportModifiers = (modifiers: readonly ts.ModifierLike[] | undefined, keepExport: boolean): readonly ts.Modifier[] | undefined => {
+const stripExportModifiers = (modifiers: readonly ts.ModifierLike[] | null, keepExport: boolean): readonly ts.Modifier[] => {
   const kept = modifiers?.filter((modifier): modifier is ts.Modifier => ts.isModifier(modifier) && modifier.kind !== ts.SyntaxKind.DefaultKeyword && (keepExport || modifier.kind !== ts.SyntaxKind.ExportKeyword));
-  return kept?.length ? kept : undefined;
+  return kept ?? [];
 };
 const assemblyType = (type: ts.TypeNode): ts.TypeNode => {
-  const name = ts.isTypeReferenceNode(type) && ts.isIdentifier(type.typeName) ? type.typeName.text : undefined;
+  const name = ts.isTypeReferenceNode(type) && ts.isIdentifier(type.typeName) ? type.typeName.text : null;
   if (name === "Promise" && ts.isTypeReferenceNode(type)) {
     const inner = type.typeArguments?.[0];
-    return !inner || inner.kind === ts.SyntaxKind.VoidKeyword ? ts.factory.createTypeReferenceNode("__BqTaskVoid", undefined)
+    return !inner || inner.kind === ts.SyntaxKind.VoidKeyword ? ts.factory.createTypeReferenceNode("__BqTaskVoid")
       : ts.factory.createTypeReferenceNode("__BqTask", [assemblyType(inner)]);
   }
-  const mapped = name ? typeAliases.get(name) : undefined;
+  const mapped = name ? typeAliases.get(name) : null;
   if (mapped && ts.isTypeReferenceNode(type)) return ts.factory.createTypeReferenceNode(mapped, type.typeArguments?.map(assemblyType));
-  if (type.kind === ts.SyntaxKind.NumberKeyword) return ts.factory.createTypeReferenceNode("f64", undefined);
-  if (type.kind === ts.SyntaxKind.BigIntKeyword) return ts.factory.createTypeReferenceNode("i64", undefined);
-  if (type.kind === ts.SyntaxKind.BooleanKeyword) return ts.factory.createTypeReferenceNode("bool", undefined);
+  if (type.kind === ts.SyntaxKind.NumberKeyword) return ts.factory.createTypeReferenceNode("f64");
+  if (type.kind === ts.SyntaxKind.BigIntKeyword) return ts.factory.createTypeReferenceNode("i64");
+  if (type.kind === ts.SyntaxKind.BooleanKeyword) return ts.factory.createTypeReferenceNode("bool");
   return type;
 };
 
@@ -420,102 +420,102 @@ const assemblyType = (type: ts.TypeNode): ts.TypeNode => {
  * AssemblyScript otherwise infers i32 from the same literal.
  */
 const materialiseInferredTypes = config.materialiseInferredTypes !== false;
-const unionType = (type: ts.UnionType, location: ts.Node, depth: number): ts.TypeNode | undefined => {
+const unionType = (type: ts.UnionType, location: ts.Node, depth: number): ts.TypeNode | null => {
   const withoutUndefined = type.types.filter(item => !(item.flags & ts.TypeFlags.Undefined));
   const hasNullish = withoutUndefined.length !== type.types.length || type.types.some(item => Boolean(item.flags & ts.TypeFlags.Null));
   const concrete = withoutUndefined.filter(item => !(item.flags & ts.TypeFlags.Null));
-  const single = concrete.length === 1 ? concrete[0] : undefined;
+  const single = concrete.length === 1 ? concrete[0] ?? null : null;
   if (single) return nullableType(single, hasNullish, location, depth);
-  if (concrete.every(item => Boolean(item.flags & ts.TypeFlags.NumberLike))) return ts.factory.createTypeReferenceNode("f64", undefined);
-  if (concrete.every(item => Boolean(item.flags & ts.TypeFlags.BooleanLike))) return ts.factory.createTypeReferenceNode("bool", undefined);
+  if (concrete.every(item => Boolean(item.flags & ts.TypeFlags.NumberLike))) return ts.factory.createTypeReferenceNode("f64");
+  if (concrete.every(item => Boolean(item.flags & ts.TypeFlags.BooleanLike))) return ts.factory.createTypeReferenceNode("bool");
   if (concrete.every(item => Boolean(item.flags & ts.TypeFlags.StringLike))) return ts.factory.createKeywordTypeNode(ts.SyntaxKind.StringKeyword);
-  return undefined;
+  return null;
 };
-const tupleType = (type: ts.Type, location: ts.Node, depth: number): ts.TypeNode | undefined => {
+const tupleType = (type: ts.Type, location: ts.Node, depth: number): ts.TypeNode | null => {
   const elements = checker.getTypeArguments(type as ts.TypeReference);
-  if (!elements.length) return ts.factory.createTypeReferenceNode("Array", [ts.factory.createTypeReferenceNode("f64", undefined)]);
+  if (!elements.length) return ts.factory.createTypeReferenceNode("Array", [ts.factory.createTypeReferenceNode("f64")]);
   const nodes = elements.map(item => nativeTypeNode(item, location, depth + 1));
-  if (nodes.some(item => !item)) return undefined;
+  if (nodes.some(item => !item)) return null;
   const printed = nodes.map(item => ts.createPrinter().printNode(ts.EmitHint.Unspecified, required(item, "item"), location.getSourceFile()));
   if (printed.every(item => item === printed[0])) return ts.factory.createTypeReferenceNode("Array", [required(nodes[0], "nodes[0]")]);
-  return undefined;
+  return null;
 };
-const callableType = (signature: ts.Signature, location: ts.Node, depth: number): ts.TypeNode | undefined => {
+const callableType = (signature: ts.Signature, location: ts.Node, depth: number): ts.TypeNode | null => {
   const parameters: ts.ParameterDeclaration[] = [];
   for (const parameter of signature.getParameters()) {
     const declaration = parameter.valueDeclaration ?? parameter.declarations?.[0] ?? location;
     const parameterType = nativeTypeNode(checker.getTypeOfSymbolAtLocation(parameter, declaration), declaration, depth + 1);
-    if (!parameterType) return undefined;
+    if (!parameterType) return null;
     parameters.push(ts.factory.createParameterDeclaration(undefined, undefined, parameter.getName(), undefined, parameterType, undefined));
   }
   const result = nativeTypeNode(signature.getReturnType(), location, depth + 1);
-  return result ? ts.factory.createFunctionTypeNode(undefined, parameters, result) : undefined;
+  return result ? ts.factory.createFunctionTypeNode(undefined, parameters, result) : null;
 };
-const symbolType = (symbol: ts.Symbol, type: ts.Type, location: ts.Node, depth: number): ts.TypeNode | undefined => {
+const symbolType = (symbol: ts.Symbol, type: ts.Type, location: ts.Node, depth: number): ts.TypeNode | null => {
   if (symbol.getName() === "Awaited") {
     const arguments_ = type.aliasTypeArguments ?? (type as ts.TypeReference).typeArguments;
     const inner = arguments_?.[0];
-    return inner ? nativeTypeNode(inner, location, depth + 1) : undefined;
+    return inner ? nativeTypeNode(inner, location, depth + 1) : null;
   }
   if (symbol.getName() === "Promise") return promiseType(type, location, depth);
   const mapped = typeAliases.get(symbol.getName());
-  if (mapped) return ts.factory.createTypeReferenceNode(mapped, undefined);
+  if (mapped) return ts.factory.createTypeReferenceNode(mapped);
   const replacement = abiSymbols.get(symbol) ?? renamedSymbols.get(symbol) ?? symbol.getName();
-  if (!replacement || replacement === "__type") return undefined;
+  if (!replacement || replacement === "__type") return null;
   const arguments_ = type.aliasTypeArguments ?? (type as ts.TypeReference).typeArguments;
   const typeArguments = arguments_?.map(item => nativeTypeNode(item, location, depth + 1));
-  if (typeArguments?.some(item => !item)) return undefined;
-  return ts.factory.createTypeReferenceNode(replacement, typeArguments as ts.TypeNode[] | undefined);
+  if (typeArguments?.some(item => !item)) return null;
+  return typeArguments ? ts.factory.createTypeReferenceNode(replacement, typeArguments.map(item => required(item, "generic type argument"))) : ts.factory.createTypeReferenceNode(replacement);
 };
-const nullableType = (type: ts.Type, hasNullish: boolean, location: ts.Node, depth: number): ts.TypeNode | undefined => {
+const nullableType = (type: ts.Type, hasNullish: boolean, location: ts.Node, depth: number): ts.TypeNode | null => {
   const inner = nativeTypeNode(type, location, depth + 1);
-  if (!inner) return undefined;
+  if (!inner) return null;
   // AssemblyScript permits null on managed references, not numeric storage.
   const primitive = type.flags & (ts.TypeFlags.NumberLike | ts.TypeFlags.BigIntLike | ts.TypeFlags.BooleanLike);
   return hasNullish && !primitive ? ts.factory.createUnionTypeNode([inner, ts.factory.createLiteralTypeNode(ts.factory.createNull())]) : inner;
 };
-const promiseType = (type: ts.Type, location: ts.Node, depth: number): ts.TypeNode | undefined => {
+const promiseType = (type: ts.Type, location: ts.Node, depth: number): ts.TypeNode | null => {
   const inner = (type.aliasTypeArguments ?? (type as ts.TypeReference).typeArguments)?.[0];
-  if (!inner || inner.flags & ts.TypeFlags.Void) return ts.factory.createTypeReferenceNode("__BqTaskVoid", undefined);
+  if (!inner || inner.flags & ts.TypeFlags.Void) return ts.factory.createTypeReferenceNode("__BqTaskVoid");
   const innerNode = nativeTypeNode(inner, location, depth + 1);
-  return innerNode ? ts.factory.createTypeReferenceNode("__BqTask", [innerNode]) : undefined;
+  return innerNode ? ts.factory.createTypeReferenceNode("__BqTask", [innerNode]) : null;
 };
-const nativeTypeNode = (type: ts.Type, location: ts.Node, depth = 0): ts.TypeNode | undefined => {
-  if (depth > 16) return undefined;
+const nativeTypeNode = (type: ts.Type, location: ts.Node, depth = 0): ts.TypeNode | null => {
+  if (depth > 16) return null;
   const aliasName = type.aliasSymbol?.getName();
-  const awaitedAlias = aliasName === "Awaited" ? type.aliasTypeArguments?.[0] : undefined;
+  const awaitedAlias = aliasName === "Awaited" ? type.aliasTypeArguments?.[0] : null;
   if (awaitedAlias) return nativeTypeNode(awaitedAlias, location, depth + 1);
-  const aliasType = aliasName ? typeAliases.get(aliasName) : undefined;
-  if (aliasType) return ts.factory.createTypeReferenceNode(aliasType, undefined);
+  const aliasType = aliasName ? typeAliases.get(aliasName) : null;
+  if (aliasType) return ts.factory.createTypeReferenceNode(aliasType);
   const flags = type.flags;
-  if (flags & ts.TypeFlags.Any || flags & ts.TypeFlags.Unknown) return undefined;
-  if (flags & ts.TypeFlags.NumberLike) return ts.factory.createTypeReferenceNode("f64", undefined);
-  if (flags & ts.TypeFlags.BigIntLike) return ts.factory.createTypeReferenceNode("i64", undefined);
-  if (flags & ts.TypeFlags.BooleanLike) return ts.factory.createTypeReferenceNode("bool", undefined);
+  if (flags & ts.TypeFlags.Any || flags & ts.TypeFlags.Unknown) return null;
+  if (flags & ts.TypeFlags.NumberLike) return ts.factory.createTypeReferenceNode("f64");
+  if (flags & ts.TypeFlags.BigIntLike) return ts.factory.createTypeReferenceNode("i64");
+  if (flags & ts.TypeFlags.BooleanLike) return ts.factory.createTypeReferenceNode("bool");
   if (flags & ts.TypeFlags.StringLike) return ts.factory.createKeywordTypeNode(ts.SyntaxKind.StringKeyword);
   if (flags & ts.TypeFlags.Void) return ts.factory.createKeywordTypeNode(ts.SyntaxKind.VoidKeyword);
   if (flags & ts.TypeFlags.Never) return ts.factory.createKeywordTypeNode(ts.SyntaxKind.VoidKeyword);
   if (flags & ts.TypeFlags.TypeParameter) {
     const symbol = type.getSymbol();
-    return symbol ? ts.factory.createTypeReferenceNode(symbol.getName(), undefined) : undefined;
+    return symbol ? ts.factory.createTypeReferenceNode(symbol.getName()) : null;
   }
   if (type.isUnion()) return unionType(type, location, depth);
   if (checker.isTupleType(type)) return tupleType(type, location, depth);
   if (checker.isArrayType(type)) {
     const element = checker.getTypeArguments(type as ts.TypeReference)[0];
-    const elementNode = element ? nativeTypeNode(element, location, depth + 1) : undefined;
-    return elementNode ? ts.factory.createTypeReferenceNode("Array", [elementNode]) : undefined;
+    const elementNode = element ? nativeTypeNode(element, location, depth + 1) : null;
+    return elementNode ? ts.factory.createTypeReferenceNode("Array", [elementNode]) : null;
   }
   const signatures = checker.getSignaturesOfType(type, ts.SignatureKind.Call);
   if (signatures.length === 1) return callableType(required(signatures[0], "signatures[0]"), location, depth);
   const symbol = type.aliasSymbol ?? type.getSymbol();
   if (symbol) return symbolType(symbol, type, location, depth);
-  return undefined;
+  return null;
 };
-const declaredTypeOfSymbol = (symbol: ts.Symbol | undefined, seen = new Set<ts.Symbol>()): ts.TypeNode | undefined => {
-  if (!symbol) return undefined;
+const declaredTypeOfSymbol = (symbol: ts.Symbol | null, seen = new Set<ts.Symbol>()): ts.TypeNode | null => {
+  if (!symbol) return null;
   const target = symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
-  if (seen.has(target)) return undefined;
+  if (seen.has(target)) return null;
   const nextSeen = new Set(seen);
   nextSeen.add(target);
   for (const declaration of target.declarations ?? []) {
@@ -523,13 +523,13 @@ const declaredTypeOfSymbol = (symbol: ts.Symbol | undefined, seen = new Set<ts.S
       return assemblyType(declaration.type);
     }
     const inferred = (ts.isVariableDeclaration(declaration) || ts.isPropertyDeclaration(declaration)) && declaration.initializer
-      ? syntacticTypeOfExpression(declaration.initializer, nextSeen) : undefined;
+      ? syntacticTypeOfExpression(declaration.initializer, nextSeen) : null;
     if (inferred) return inferred;
     if ((ts.isFunctionDeclaration(declaration) || ts.isMethodDeclaration(declaration) || ts.isMethodSignature(declaration) || ts.isGetAccessorDeclaration(declaration)) && declaration.type) {
       return assemblyType(declaration.type);
     }
   }
-  return undefined;
+  return null;
 };
 const numericConstantExpression = (node: ts.Expression): boolean => {
   if (ts.isNumericLiteral(node) || ts.isBigIntLiteral(node)) return true;
@@ -548,18 +548,19 @@ const numericConstantExpression = (node: ts.Expression): boolean => {
   }
   return false;
 };
-const callExpressionType = (expression: ts.CallExpression | ts.NewExpression): ts.TypeNode | undefined => {
+const callExpressionType = (expression: ts.CallExpression | ts.NewExpression): ts.TypeNode | null => {
   const signature = checker.getResolvedSignature(expression);
-  const declarationType = (signature?.declaration as { type?: ts.TypeNode } | undefined)?.type;
+  const declaration = signature?.declaration;
+  const declarationType = declaration && "type" in declaration ? declaration.type : null;
   if (declarationType && ts.isTypeNode(declarationType) && ts.isTypeReferenceNode(declarationType) && ts.isIdentifier(declarationType.typeName) && typeAliases.has(declarationType.typeName.text)) {
     return assemblyType(declarationType);
   }
-  const instantiated = signature ? nativeTypeNode(signature.getReturnType(), expression) : undefined;
+  const instantiated = signature ? nativeTypeNode(signature.getReturnType(), expression) : null;
   if (instantiated) return instantiated;
   if (declarationType && ts.isTypeNode(declarationType)) return assemblyType(declarationType);
-  return undefined;
+  return null;
 };
-const conditionalExpressionType = (expression: ts.ConditionalExpression, seen: Set<ts.Symbol>): ts.TypeNode | undefined => {
+const conditionalExpressionType = (expression: ts.ConditionalExpression, seen: Set<ts.Symbol>): ts.TypeNode | null => {
   const left = syntacticTypeOfExpression(expression.whenTrue, seen);
   const right = syntacticTypeOfExpression(expression.whenFalse, seen);
   const printer = ts.createPrinter();
@@ -568,15 +569,15 @@ const conditionalExpressionType = (expression: ts.ConditionalExpression, seen: S
   if (left && numericConstantExpression(expression.whenFalse)) return left;
   if (right && numericConstantExpression(expression.whenTrue)) return right;
   const conditionOperand = numericConstantExpression(expression.whenTrue) && numericConstantExpression(expression.whenFalse) && ts.isBinaryExpression(expression.condition)
-    ? syntacticTypeOfExpression(expression.condition.left, seen) ?? syntacticTypeOfExpression(expression.condition.right, seen) : undefined;
+    ? syntacticTypeOfExpression(expression.condition.left, seen) ?? syntacticTypeOfExpression(expression.condition.right, seen) : null;
   if (conditionOperand) return conditionOperand;
   if ((expression.whenTrue.kind === ts.SyntaxKind.TrueKeyword || expression.whenTrue.kind === ts.SyntaxKind.FalseKeyword) &&
       (expression.whenFalse.kind === ts.SyntaxKind.TrueKeyword || expression.whenFalse.kind === ts.SyntaxKind.FalseKeyword)) {
-    return ts.factory.createTypeReferenceNode("bool", undefined);
+    return ts.factory.createTypeReferenceNode("bool");
   }
-  return undefined;
+  return null;
 };
-const binaryExpressionType = (expression: ts.BinaryExpression, seen: Set<ts.Symbol>): ts.TypeNode | undefined => {
+const binaryExpressionType = (expression: ts.BinaryExpression, seen: Set<ts.Symbol>): ts.TypeNode | null => {
   const operator = expression.operatorToken.kind;
   const comparisonOperators = new Set<ts.SyntaxKind>([
     ts.SyntaxKind.EqualsEqualsToken, ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsToken,
@@ -584,30 +585,30 @@ const binaryExpressionType = (expression: ts.BinaryExpression, seen: Set<ts.Symb
     ts.SyntaxKind.GreaterThanToken, ts.SyntaxKind.GreaterThanEqualsToken, ts.SyntaxKind.InKeyword,
     ts.SyntaxKind.InstanceOfKeyword,
   ]);
-  if (comparisonOperators.has(operator)) return ts.factory.createTypeReferenceNode("bool", undefined);
+  if (comparisonOperators.has(operator)) return ts.factory.createTypeReferenceNode("bool");
   return syntacticTypeOfExpression(expression.left, seen) ?? syntacticTypeOfExpression(expression.right, seen);
 };
-const syntacticTypeOfExpression = (expression: ts.Expression | undefined, seen = new Set<ts.Symbol>()): ts.TypeNode | undefined => {
-  if (!expression) return undefined;
+const syntacticTypeOfExpression = (expression: ts.Expression | null, seen = new Set<ts.Symbol>()): ts.TypeNode | null => {
+  if (!expression) return null;
   if (ts.isAsExpression(expression) || ts.isTypeAssertionExpression(expression)) return assemblyType(expression.type);
   if (ts.isParenthesizedExpression(expression) || ts.isNonNullExpression(expression)) return syntacticTypeOfExpression(expression.expression, seen);
-  if (ts.isIdentifier(expression)) return declaredTypeOfSymbol(checker.getSymbolAtLocation(expression), seen);
-  if (ts.isPropertyAccessExpression(expression)) return declaredTypeOfSymbol(checker.getSymbolAtLocation(expression.name), seen);
+  if (ts.isIdentifier(expression)) return declaredTypeOfSymbol(checker.getSymbolAtLocation(expression) ?? null, seen);
+  if (ts.isPropertyAccessExpression(expression)) return declaredTypeOfSymbol(checker.getSymbolAtLocation(expression.name) ?? null, seen);
   if (ts.isCallExpression(expression) || ts.isNewExpression(expression)) return callExpressionType(expression);
   if (ts.isConditionalExpression(expression)) return conditionalExpressionType(expression, seen);
   if (ts.isBinaryExpression(expression)) return binaryExpressionType(expression, seen);
   if (ts.isPrefixUnaryExpression(expression) || ts.isPostfixUnaryExpression(expression)) return syntacticTypeOfExpression(expression.operand, seen);
-  return undefined;
+  return null;
 };
-const returnedFromTypedFunction = (node: ts.Node): ts.TypeNode | undefined => {
+const returnedFromTypedFunction = (node: ts.Node): ts.TypeNode | null => {
   // A directly returned local inherits its enclosing explicit return representation, including async task results.
-  if (!ts.isIdentifier(node)) return undefined;
+  if (!ts.isIdentifier(node)) return null;
   const symbol = symbolOf(node);
-  if (!symbol) return undefined;
-  let current: ts.Node | undefined = node;
-  while (current && !ts.isFunctionLike(current)) current = current.parent;
-  if (!current || !(ts.isFunctionDeclaration(current) || ts.isMethodDeclaration(current) || ts.isFunctionExpression(current) || ts.isArrowFunction(current) || ts.isGetAccessorDeclaration(current) || ts.isSetAccessorDeclaration(current))) return undefined;
-  if (!current.type || !ts.isTypeNode(current.type) || !current.body) return undefined;
+  if (!symbol) return null;
+  let current: ts.Node | null = node;
+  while (current && !ts.isFunctionLike(current)) current = current.parent ?? null;
+  if (!current || !(ts.isFunctionDeclaration(current) || ts.isMethodDeclaration(current) || ts.isFunctionExpression(current) || ts.isArrowFunction(current) || ts.isGetAccessorDeclaration(current) || ts.isSetAccessorDeclaration(current))) return null;
+  if (!current.type || !ts.isTypeNode(current.type) || !current.body) return null;
   let returned = false;
   const walk = (candidate: ts.Node): void => {
     if (returned) return;
@@ -620,24 +621,25 @@ const returnedFromTypedFunction = (node: ts.Node): ts.TypeNode | undefined => {
     ts.forEachChild(candidate, walk);
   };
   walk(current.body);
-  if (!returned) return undefined;
+  if (!returned) return null;
   if (functionHasAsyncModifier(current) && ts.isTypeReferenceNode(current.type) && ts.isIdentifier(current.type.typeName) && current.type.typeName.text === "Promise") {
     const inner = current.type.typeArguments?.[0];
     return inner ? assemblyType(inner) : ts.factory.createKeywordTypeNode(ts.SyntaxKind.VoidKeyword);
   }
   return assemblyType(current.type);
 };
-const inferredTypeFor = (node: ts.Node, initializer?: ts.Expression): ts.TypeNode | undefined => {
-  if (!materialiseInferredTypes) return undefined;
+const inferredTypeFor = (node: ts.Node, initializer: ts.Expression | null = null): ts.TypeNode | null => {
+  if (!materialiseInferredTypes) return null;
   return syntacticTypeOfExpression(initializer) ?? returnedFromTypedFunction(node) ?? nativeTypeNode(checker.getTypeAtLocation(node), node);
 };
-const inferredReturnTypeFor = (node: ts.SignatureDeclaration): ts.TypeNode | undefined => {
-  if (!materialiseInferredTypes) return undefined;
-  const fromBody = (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) && !ts.isBlock(node.body) ? syntacticTypeOfExpression(node.body) : undefined;
+const inferredReturnTypeFor = (node: ts.SignatureDeclaration): ts.TypeNode | null => {
+  if (!materialiseInferredTypes) return null;
+  const fromBody = (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) && !ts.isBlock(node.body) ? syntacticTypeOfExpression(node.body) : null;
   if (fromBody) return fromBody;
   const signature = checker.getSignatureFromDeclaration(node);
-  const declarationType = (signature?.declaration as { type?: ts.TypeNode } | undefined)?.type;
-  return declarationType ? assemblyType(declarationType) : signature ? nativeTypeNode(signature.getReturnType(), node) : undefined;
+  const declaration = signature?.declaration;
+  const declarationType = declaration && "type" in declaration ? declaration.type : null;
+  return declarationType && ts.isTypeNode(declarationType) ? assemblyType(declarationType) : signature ? nativeTypeNode(signature.getReturnType(), node) : null;
 };
 
 interface AsyncUnit {
@@ -667,7 +669,7 @@ for (const entry of sourceEntries) {
     if (!symbol || !classSymbol) return;
       const className = abiSymbols.get(classSymbol) ?? renamedSymbols.get(classSymbol) ?? node.parent.name.text;
       const classTypeParameters = node.parent.typeParameters ?? [];
-      const classTypeArguments = classTypeParameters.map(parameter => ts.factory.createTypeReferenceNode(parameter.name.text, undefined));
+      const classTypeArguments = classTypeParameters.map(parameter => ts.factory.createTypeReferenceNode(parameter.name.text));
       const frameTypeParameters = isStatic ? [...(node.typeParameters ?? [])] : [...classTypeParameters, ...(node.typeParameters ?? [])];
       asyncFunctionDeclarations.push({
         name,
@@ -796,7 +798,7 @@ const promisedResultType = (node: ts.FunctionDeclaration | ts.ArrowFunction | ts
   return { source: promised, native, isVoid };
 };
 const taskTypeFor = (result: { native: ts.TypeNode; isVoid: boolean }): ts.TypeNode => result.isVoid
-  ? ts.factory.createTypeReferenceNode("__BqTaskVoid", undefined)
+  ? ts.factory.createTypeReferenceNode("__BqTaskVoid")
   : ts.factory.createTypeReferenceNode("__BqTask", [result.native]);
 const containsNestedAwait = (node: ts.Node): boolean => {
   let found = false;
@@ -847,7 +849,7 @@ const lowerSource = (entry: SourceEntry): string => {
       const helper = asyncHelpers.get(functionSymbol);
       if (!helper) throw new Error(`${lineAndColumn(source, node.getStart(source))}: BQ2013: missing coroutine helper identity`);
       const { frameName } = helper;
-      const frameTypeArguments = unit.frameTypeParameters?.map(parameter => ts.factory.createTypeReferenceNode(parameter.name.text, undefined));
+      const frameTypeArguments = unit.frameTypeParameters?.map(parameter => ts.factory.createTypeReferenceNode(parameter.name.text));
       const frameTypeReference = ts.factory.createTypeReferenceNode(frameName, frameTypeArguments);
       const frameBindings = new Map<ts.Symbol, AsyncFrameBinding>();
       const bindings: AsyncFrameBinding[] = [];
@@ -1336,7 +1338,7 @@ const lowerSource = (entry: SourceEntry): string => {
         const iterableField = `__bq_forof_values_${expressionCaptureIndex++}`;
         const indexField = `__bq_forof_index_${expressionCaptureIndex++}`;
         expressionCaptureFields.push({ field: iterableField, type: iterableType });
-        expressionCaptureFields.push({ field: indexField, type: ts.factory.createTypeReferenceNode("i32", undefined) });
+        expressionCaptureFields.push({ field: indexField, type: ts.factory.createTypeReferenceNode("i32") });
         const iterableAccess = ts.factory.createPropertyAccessExpression(frameIdentifier, iterableField);
         const indexAccess = ts.factory.createPropertyAccessExpression(frameIdentifier, indexField);
         const elementAccess = ts.factory.createElementAccessExpression(iterableAccess, indexAccess);
@@ -1463,7 +1465,7 @@ const lowerSource = (entry: SourceEntry): string => {
       const switchStatement = ts.factory.createSwitchStatement(ts.factory.createPropertyAccessExpression(frameIdentifier, "__bq_state"),
         ts.factory.createCaseBlock([...clauses, ts.factory.createDefaultClause([ts.factory.createReturnStatement()])]));
       const frameMembers: ts.ClassElement[] = [
-        ts.factory.createPropertyDeclaration(undefined, "__bq_state", undefined, ts.factory.createTypeReferenceNode("i32", undefined), ts.factory.createNumericLiteral(entryState)),
+        ts.factory.createPropertyDeclaration(undefined, "__bq_state", undefined, ts.factory.createTypeReferenceNode("i32"), ts.factory.createNumericLiteral(entryState)),
         ts.factory.createPropertyDeclaration(undefined, "__bq_task", ts.factory.createToken(ts.SyntaxKind.ExclamationToken), taskType, undefined),
       ];
       if (unit.receiverType) frameMembers.push(ts.factory.createPropertyDeclaration(undefined, "__bq_this", ts.factory.createToken(ts.SyntaxKind.ExclamationToken), unit.receiverType, undefined));
@@ -1536,9 +1538,9 @@ const lowerSource = (entry: SourceEntry): string => {
       if (!replacement) throw new Error(`${lineAndColumn(source, node.getStart(source))}: namespace ${kind} ${node.getText(source)} does not resolve to a flattened Baguette symbol`);
       return ts.factory.createIdentifier(replacement);
     };
-    const flattenedName = (name: ts.Identifier): string | undefined => {
+    const flattenedName = (name: ts.Identifier): string | null => {
       const symbol = symbolOf(name);
-      return symbol && (abiSymbols.get(symbol) ?? renamedSymbols.get(symbol));
+      return symbol ? abiSymbols.get(symbol) ?? renamedSymbols.get(symbol) ?? null : null;
     };
     visit = node => {
       if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) return undefined;
@@ -1569,28 +1571,28 @@ const lowerSource = (entry: SourceEntry): string => {
         (ts.isFunctionDeclaration(node) && ts.isFunctionDeclaration(declaration) || ts.isMethodDeclaration(node) && ts.isMethodDeclaration(declaration)) && Boolean(declaration.body));
       if (hasImplementation) return undefined;
       if (ts.isVariableDeclaration(node) && !node.type) {
-        const inferred = inferredTypeFor(node.name, node.initializer);
-        return ts.visitEachChild(ts.factory.updateVariableDeclaration(node, node.name, node.exclamationToken, inferred, node.initializer), visit, context);
+        const inferred = inferredTypeFor(node.name, node.initializer ?? null);
+        return ts.visitEachChild(ts.factory.updateVariableDeclaration(node, node.name, node.exclamationToken, inferred ?? node.type, node.initializer), visit, context);
       }
       if (ts.isParameter(node) && !node.type) {
         const inferred = inferredTypeFor(node.name);
-        return ts.visitEachChild(ts.factory.updateParameterDeclaration(node, node.modifiers, node.dotDotDotToken, node.name, node.questionToken, inferred, node.initializer), visit, context);
+        return ts.visitEachChild(ts.factory.updateParameterDeclaration(node, node.modifiers, node.dotDotDotToken, node.name, node.questionToken, inferred ?? node.type, node.initializer), visit, context);
       }
       if (ts.isPropertyDeclaration(node) && !node.type) {
-        const inferred = inferredTypeFor(node.name, node.initializer);
-        return ts.visitEachChild(ts.factory.updatePropertyDeclaration(node, node.modifiers, node.name, node.questionToken ?? node.exclamationToken, inferred, node.initializer), visit, context);
+        const inferred = inferredTypeFor(node.name, node.initializer ?? null);
+        return ts.visitEachChild(ts.factory.updatePropertyDeclaration(node, node.modifiers, node.name, node.questionToken ?? node.exclamationToken, inferred ?? node.type, node.initializer), visit, context);
       }
       if (ts.isFunctionExpression(node) && !node.type) {
-        return ts.visitEachChild(ts.factory.updateFunctionExpression(node, node.modifiers, node.asteriskToken, node.name, node.typeParameters, node.parameters, inferredReturnTypeFor(node), node.body), visit, context);
+        return ts.visitEachChild(ts.factory.updateFunctionExpression(node, node.modifiers, node.asteriskToken, node.name, node.typeParameters, node.parameters, inferredReturnTypeFor(node) ?? node.type, node.body), visit, context);
       }
       if (ts.isArrowFunction(node) && !node.type) {
-        return ts.visitEachChild(ts.factory.updateArrowFunction(node, node.modifiers, node.typeParameters, node.parameters, inferredReturnTypeFor(node), node.equalsGreaterThanToken, node.body), visit, context);
+        return ts.visitEachChild(ts.factory.updateArrowFunction(node, node.modifiers, node.typeParameters, node.parameters, inferredReturnTypeFor(node) ?? node.type, node.equalsGreaterThanToken, node.body), visit, context);
       }
       if (ts.isMethodDeclaration(node) && !node.type) {
-        return ts.visitEachChild(ts.factory.updateMethodDeclaration(node, node.modifiers, node.asteriskToken, node.name, node.questionToken, node.typeParameters, node.parameters, inferredReturnTypeFor(node), node.body), visit, context);
+        return ts.visitEachChild(ts.factory.updateMethodDeclaration(node, node.modifiers, node.asteriskToken, node.name, node.questionToken, node.typeParameters, node.parameters, inferredReturnTypeFor(node) ?? node.type, node.body), visit, context);
       }
       if (ts.isGetAccessorDeclaration(node) && !node.type) {
-        return ts.visitEachChild(ts.factory.updateGetAccessorDeclaration(node, node.modifiers, node.name, node.parameters, inferredReturnTypeFor(node), node.body), visit, context);
+        return ts.visitEachChild(ts.factory.updateGetAccessorDeclaration(node, node.modifiers, node.name, node.parameters, inferredReturnTypeFor(node) ?? node.type, node.body), visit, context);
       }
       if (ts.isIdentifier(node)) {
         const replacement = flattenedName(node);
@@ -1616,13 +1618,13 @@ const lowerSource = (entry: SourceEntry): string => {
           const arrow = declaration.initializer;
           const body = ts.isBlock(arrow.body) ? arrow.body : ts.factory.createBlock([ts.factory.createReturnStatement(arrow.body)], true);
           const functionNode = ts.factory.createFunctionDeclaration(
-            stripExportModifiers(node.modifiers, isAbi), undefined, declaration.name, arrow.typeParameters, arrow.parameters, arrow.type, body,
+            stripExportModifiers(node.modifiers ?? null, isAbi), undefined, declaration.name, arrow.typeParameters, arrow.parameters, arrow.type, body,
           );
           return ts.visitEachChild(functionNode, visit, context);
       }
       if (ts.isFunctionDeclaration(node) && node.name) {
         const symbol = symbolOf(node.name);
-        return ts.visitEachChild(ts.factory.updateFunctionDeclaration(node, stripExportModifiers(node.modifiers, Boolean(symbol && abiSymbols.has(symbol))), node.asteriskToken, node.name, node.typeParameters, node.parameters, node.type ?? inferredReturnTypeFor(node), node.body), visit, context);
+        return ts.visitEachChild(ts.factory.updateFunctionDeclaration(node, stripExportModifiers(node.modifiers ?? null, Boolean(symbol && abiSymbols.has(symbol))), node.asteriskToken, node.name, node.typeParameters, node.parameters, node.type ?? inferredReturnTypeFor(node) ?? node.type, node.body), visit, context);
       }
       const preserveRange = ts.canHaveModifiers(node) && ts.getModifiers(node)?.some(item => item.kind === ts.SyntaxKind.ExportKeyword);
       const clone = ts.visitEachChild(node, visit, context);
