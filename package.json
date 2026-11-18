@@ -8,10 +8,11 @@
     "baguette": "./src/compiler.ts"
   },
   "scripts": {
-    "check": "tsc -p tsconfig.json --noEmit && npm run bake:check",
+    "check": "npm run guards && tsc -p tsconfig.json --noEmit && npm run bake:check",
     "bake:check": "tsc -p vendor/bake/tsconfig.json --noEmit && tsc -p vendor/bake/tsconfig.core.json --noEmit",
     "test:source-contract": "bun test src/test/source-contract.test.ts",
-    "test:wat-modules": "bun test src/test/wat-modules.test.ts"
+    "test:wat-modules": "bun test src/test/wat-modules.test.ts",
+    "guards": "code-guards all --strict --path . --include-tests"
   },
   "dependencies": {
     "assemblyscript": "0.28.19",
@@ -19,7 +20,8 @@
     "typescript": "^5.9.2"
   },
   "devDependencies": {
-    "@types/node": "^22.15.0"
+    "@types/node": "^22.15.0",
+    "@kitty-crow/code-guards": "git+https://github.com/kitty-crow/code-guards.git#ed92b24c29a21c6cf03486c73b070005bb7bb959"
   },
   "engines": {
     "bun": ">=1.1.0",
