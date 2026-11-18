@@ -1,4 +1,9 @@
-import type { HostProcess, BaguetteVariant } from "./contracts.ts";
+import type { BaguetteConfig } from "./contracts.ts";
+import processHost from "node:process";
+import * as fs from "node:fs/promises";
+import * as pathHost from "node:path";
+import { spawn } from "node:child_process";
+import { parseConfig, parseJsonObject } from "./contracts.ts";
 import { required } from "./required.ts";
 import "./bake-stage.ts";
 import { modularWat } from "./wat-modules.ts";
@@ -9,79 +14,7 @@ import { assertCanonicalThistleSource } from "./source-contract.ts";
 const BAGUETTE_VERSION = "0.2.6";
 const MANIFEST_SCHEMA = 3;
 
-interface BunFile {
-  arrayBuffer(): Promise<ArrayBuffer>;
-}
 interface BunResult { exitCode: number; stdout: Uint8Array; stderr: Uint8Array; }
-interface BunSubprocess { exited: Promise<number>; kill(signal?: number | string): void; }
-interface BunApi {
-  file(path: string): BunFile;
-  write(path: string, data: string | Uint8Array): Promise<number>;
-  spawn(command: string[], options?: { cwd?: string; env?: Record<string, string | undefined>; stdout?: "inherit"; stderr?: "inherit" }): BunSubprocess;
-}
-interface HostFs {
-  mkdir(path: string, options: { recursive: boolean }): Promise<void>;
-  rm(path: string, options: { recursive: boolean; force: boolean }): Promise<void>;
-  readFile(path: string): Promise<Uint8Array>;
-  readFile(path: string, encoding: "utf8"): Promise<string>;
-  writeFile(path: string, data: string | Uint8Array): Promise<void>;
-  copyFile(source: string, destination: string): Promise<void>;
-}
-interface HostPath {
-  resolve(...parts: string[]): string;
-  relative(from: string, to: string): string;
-  dirname(path: string): string;
-  extname(path: string): string;
-  normalize(path: string): string;
-  sep: string;
-}
-interface BaguetteMemoryConfig {
-  initialPages?: number;
-  maximumPages?: number;
-  import?: boolean;
-  export?: boolean;
-}
-interface BaguetteAbiVerification {
-  init?: string;
-  initArgs?: Array<number | string>;
-  initExpected?: number | string;
-  valid?: string;
-  validArgs?: Array<number | string>;
-  validExpected?: number | string;
-}
-interface BaguetteAbiTest { function: string; args?: Array<number | string>; expected: number | string; }
-interface BaguetteAbiConfig {
-  exports?: "all-exported-functions" | string[];
-  allowNonFunctionExports?: boolean;
-  verify?: BaguetteAbiVerification;
-  tests?: BaguetteAbiTest[];
-}
-interface BaguetteConfig {
-  schema?: number;
-  name?: string;
-  project?: string;
-  entries: string[];
-  generatedDir?: string;
-  outDir?: string;
-  moduleBaseName?: string;
-  preludeFile?: string;
-  intrinsicModules?: string[];
-  typeAliases?: Record<string, string>;
-  abiTypes?: Record<string, "number" | "bigint" | "void">;
-  abi?: BaguetteAbiConfig;
-  memory?: BaguetteMemoryConfig;
-  runtime?: "stub" | "minimal" | "incremental";
-  variants?: BaguetteVariant[];
-  allowedHostImports?: Array<{ module: string; name: string; kind: WebAssembly.ImportExportKind }>;
-  completeKernel?: boolean;
-  productionKernel?: string;
-  canonicalSource?: string;
-  canonicalRevision?: string;
-  canonicalOriginalEntries?: string[];
-  canonicalOriginalModules?: string[];
-  materialiseInferredTypes?: boolean;
-  asyncLowering?: "state-machine" | "reject";
-}
 interface SourceEntry {
   readonly path: string;
   readonly absolutePath: string;
@@ -107,51 +40,16 @@ interface VariantResult {
   readonly functionCount: number;
 }
 
-const processHost = (globalThis as unknown as { process: HostProcess }).process;
-const fs = await import("node:fs/promises" as string) as unknown as HostFs;
-const pathHost = await import("node:path" as string) as unknown as HostPath;
-const childProcess = await import("node:child_process" as string) as unknown as {
-  spawn(executable: string, args: string[], options: { cwd?: string | undefined; env?: Record<string, string | undefined> | undefined; stdio: "inherit" }): {
-    once(event: "exit", listener: (code: number | null) => void): void;
-    once(event: "error", listener: () => void): void;
-    kill(signal?: number | string): void;
-  };
-};
-const nativeBun = (globalThis as unknown as { Bun?: BunApi }).Bun;
-const bun: BunApi = nativeBun ?? {
-  file(filePath: string): BunFile {
-    return {
-      async arrayBuffer(): Promise<ArrayBuffer> {
-        const bytes = await fs.readFile(filePath);
-        return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-      },
-    };
-  },
-  async write(filePath: string, data: string | Uint8Array): Promise<number> {
-    await fs.writeFile(filePath, data);
-    return typeof data === "string" ? encoder.encode(data).byteLength : data.byteLength;
-  },
-  spawn(command: string[], options): BunSubprocess {
-    const executable = command[0];
-    if (!executable) throw new Error("Baguette backend command has no executable");
-    const child = childProcess.spawn(executable, command.slice(1), { cwd: options?.cwd, env: options?.env, stdio: "inherit" });
-    const exited = new Promise<number>(resolve => {
-      child.once("exit", code => resolve(code ?? 1));
-      child.once("error", () => resolve(1));
-    });
-    return { exited, kill(signal?: number | string): void { child.kill(signal); } };
-  },
-};
 const root = processHost.cwd();
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
 
-const optionValue = (name: string): string | undefined => {
+const optionValue = (name: string): string | null => {
   const prefix = `${name}=`;
   const direct = processHost.argv.find(value => value.startsWith(prefix));
   if (direct) return direct.slice(prefix.length);
   const index = processHost.argv.indexOf(name);
-  return index >= 0 ? processHost.argv[index + 1] : undefined;
+  return index >= 0 ? processHost.argv[index + 1] ?? null : null;
 };
 const hasOption = (name: string): boolean => processHost.argv.includes(name);
 const validateOnly = hasOption("--validate-only");
@@ -166,13 +64,17 @@ const run = async (command: string[], label: string, attempts = 1, timeoutMs = 2
   let lastExit = -1;
   let lastTimedOut = false;
   for (let attempt = 1; attempt <= attempts; attempt++) {
-    const child = bun.spawn(command, { cwd: root, env: processHost.env, stdout: "inherit", stderr: "inherit" });
+    const child = spawn(required(command[0], "backend executable"), command.slice(1), { cwd: root, env: processHost.env, stdio: "inherit" });
+    const exited = new Promise<number>(resolve => {
+      child.once("exit", code => resolve(code ?? 1));
+      child.once("error", () => resolve(1));
+    });
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill(9);
+      child.kill("SIGKILL");
     }, timeoutMs);
-    const exitCode = await child.exited;
+    const exitCode = await exited;
     clearTimeout(timer);
     lastExit = exitCode;
     lastTimedOut = timedOut;
@@ -186,7 +88,7 @@ const sha256 = async (bytes: Uint8Array): Promise<string> => {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", Uint8Array.from(bytes)));
   return [...digest].map(byte => byte.toString(16).padStart(2, "0")).join("");
 };
-const readBytes = async (path: string): Promise<Uint8Array<ArrayBuffer>> => new Uint8Array(await bun.file(path).arrayBuffer());
+const readBytes = async (path: string): Promise<Uint8Array<ArrayBuffer>> => Uint8Array.from(await fs.readFile(path));
 const readText = async (path: string): Promise<string> => fs.readFile(path, "utf8");
 const normalise = (value: string): string => pathHost.normalize(pathHost.resolve(configRoot, value));
 const relative = (value: string): string => pathHost.relative(root, value).split(pathHost.sep).join("/");
@@ -199,12 +101,7 @@ const diagnosticText = (diagnostic: ts.Diagnostic): string => {
   if (!diagnostic.file || diagnostic.start === undefined) return message;
   return `${lineAndColumn(diagnostic.file, diagnostic.start)}: ${message}`;
 };
-const parseJson = async <T>(path: string): Promise<T> => {
-  try { return JSON.parse(await readText(path)) as T; }
-  catch (error) { throw new Error(`cannot parse ${relative(path)}: ${String(error)}`); }
-};
-
-const config = await parseJson<BaguetteConfig>(configPath);
+const config: BaguetteConfig = parseConfig(await readText(configPath));
 assertCanonicalThistleSource(config);
 if (!Array.isArray(config.entries) || config.entries.length === 0) throw new Error(`${relative(configPath)} must define at least one TypeScript entry module`);
 const projectPath = normalise(config.project ?? "tsconfig.json");
@@ -1749,8 +1646,9 @@ const lowerSource = (entry: SourceEntry): string => {
 
 const compilerVersion = async (packagePath: string): Promise<string> => {
   const packageText = await readText(packagePath);
-  const value = JSON.parse(packageText) as { version?: string };
-  return value.version ?? "unknown";
+  const value = parseJsonObject(packageText);
+  const version = value.version;
+  return typeof version === "string" ? version : "unreported";
 };
 const ascVersion = await compilerVersion(`${root}/node_modules/assemblyscript/package.json`);
 const tsVersion = ts.version;
@@ -1850,7 +1748,7 @@ const buildOutputs = async (): Promise<void> => {
     const watPath = `${generated}/${variant.name}.wat`;
     const variantPrelude = required(variantPreludes.get(variant.name), "variantPreludes.get(variant.name)").text;
     const sourceText = `${variantPrelude}\n${customPrelude}\n${generatedBody}`;
-    await bun.write(sourcePath, sourceText);
+    await fs.writeFile(sourcePath, sourceText);
     const asc = async (destination: string, textFile?: string): Promise<void> => {
       const command = ["node", `${root}/node_modules/assemblyscript/bin/asc.js`, sourcePath,
         "--outFile", destination, "--runtime", config.runtime ?? "stub", "--zeroFilledMemory",
@@ -1887,10 +1785,10 @@ const buildOutputs = async (): Promise<void> => {
       for (const [file, body] of emitted.files) {
         const target = `${destination}/${file}`;
         await fs.mkdir(pathHost.dirname(target), { recursive: true });
-        await bun.write(target, body);
+        await fs.writeFile(target, body);
       }
       const layout = `${destination}/layout.json`;
-      await bun.write(layout, JSON.stringify(emitted.layout, null, 2) + "\n");
+      await fs.writeFile(layout, JSON.stringify(emitted.layout, null, 2) + "\n");
       modularLayouts[variant.name] = relative(layout);
     }
     await optimise(rawPath, wasmPath);
@@ -1959,9 +1857,9 @@ const buildOutputs = async (): Promise<void> => {
     productionKernel: config.productionKernel ?? "unset",
     variants: serialisableVariants,
   };
-  await bun.write(`${output}/${moduleBaseName}.manifest.json`, `${JSON.stringify(manifest, null, 2)}\n`);
-  await bun.write(`${output}/host-interface.d.ts`, hostInterface());
-  await bun.write(`${output}/baguette-report.json`, `${JSON.stringify({
+  await fs.writeFile(`${output}/${moduleBaseName}.manifest.json`, `${JSON.stringify(manifest, null, 2)}\n`);
+  await fs.writeFile(`${output}/host-interface.d.ts`, hostInterface());
+  await fs.writeFile(`${output}/baguette-report.json`, `${JSON.stringify({
     baguetteVersion: BAGUETTE_VERSION,
     acceptedProfile: "statically analysable TypeScript with semantic type materialisation, native coroutine state machines and native managed runtime support from AssemblyScript",
     inferredTypeMaterialisation: materialiseInferredTypes,

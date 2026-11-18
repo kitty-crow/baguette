@@ -1,4 +1,7 @@
-import type { HostProcess } from "./contracts.ts";
+import processHost from "node:process";
+import * as childProcess from "node:child_process";
+import * as fs from "node:fs/promises";
+import * as urlHost from "node:url";
 import { required } from "./required.ts";
 /**
  * Baguette 0.2.6
@@ -12,27 +15,18 @@ import { required } from "./required.ts";
  */
 
 export {};
-const processHost = (globalThis as unknown as { process: HostProcess }).process;
 const argv = new Set(processHost.argv.slice(2));
 const testCli = argv.has("--test-cli");
 const testWeb = argv.has("--test-web");
 const validateOnly = argv.has("--validate-only");
 const alternateConfig = processHost.argv.slice(2).some(value => value === "--config" || value.startsWith("--config="));
-const nativeBun = (globalThis as unknown as { Bun?: {
-  spawnSync(command: string[], options: { cwd: string; env: Record<string, string | undefined>; stdout: "inherit"; stderr: "inherit" }): { exitCode: number };
-  file(path: string): { exists(): Promise<boolean> };
-} }).Bun;
-const childProcess = await import("node:child_process" as string) as unknown as { spawnSync(executable: string, args: string[], options: { cwd: string; env: Record<string, string | undefined>; stdio: "inherit" }): { status: number | null } };
-const fs = await import("node:fs/promises" as string) as unknown as { access(path: string): Promise<void> };
+const nativeBun = Boolean(processHost.versions.bun);
 
 const run = (command: string[], label: string): void => {
-  const exitCode = nativeBun
-    ? nativeBun.spawnSync(command, { cwd: processHost.cwd(), env: processHost.env, stdout: "inherit", stderr: "inherit" }).exitCode
-    : (childProcess.spawnSync(required(command[0], "command[0]"), command.slice(1), { cwd: processHost.cwd(), env: processHost.env, stdio: "inherit" }).status ?? 1);
+  const exitCode = childProcess.spawnSync(required(command[0], "command executable"), command.slice(1), { cwd: processHost.cwd(), env: processHost.env, stdio: "inherit" }).status ?? 1;
   if (exitCode !== 0) throw new Error(`${label} failed with exit code ${exitCode}`);
 };
 const exists = async (path: string): Promise<boolean> => {
-  if (nativeBun) return nativeBun.file(path).exists();
   try { await fs.access(path); return true; } catch { return false; }
 };
 
@@ -41,9 +35,6 @@ if (testCli || testWeb) {
   run(["npm", "run", "build:thistle"], "Thistle host build");
 }
 
-const urlHost = await import("node:url" as string) as unknown as {
-  fileURLToPath(url: URL): string;
-};
 const compilerPath = urlHost.fileURLToPath(new URL("./compiler.ts", import.meta.url));
 const compilerCommand = nativeBun
   ? [processHost.execPath, "run", compilerPath, ...processHost.argv.slice(2)]
