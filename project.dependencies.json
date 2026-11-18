@@ -9,6 +9,15 @@
       "relationship": "contract",
       "direct": true,
       "updatePolicy": "pull-request"
+    },
+    {
+      "name": "Bake",
+      "repository": "kittycrow-kittyx/bake",
+      "path": "vendor/bake",
+      "commit": "3b70f134e0912d8d8aadf10fb13b5df2f4bd361c",
+      "relationship": "build",
+      "direct": true,
+      "updatePolicy": "pull-request"
     }
   ]
 }
