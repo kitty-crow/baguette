@@ -756,35 +756,36 @@ interface AsyncUnit {
 const asyncFunctionDeclarations: AsyncUnit[] = [];
 for (const entry of sourceEntries) {
   if (intrinsicModules.has(entry.absolutePath)) continue;
+  const collectFunction = (node: ts.FunctionDeclaration, name: ts.Identifier, body: ts.Block): void => {
+    const symbol = symbolOf(name);
+    if (symbol) asyncFunctionDeclarations.push({ name, declaration: node, body, parameters: node.parameters, typeParameters: node.typeParameters, frameTypeParameters: node.typeParameters, modifiers: node.modifiers, symbol });
+  };
+  const collectMethod = (node: ts.MethodDeclaration, name: ts.Identifier, body: ts.Block): void => {
+    if (!ts.isClassDeclaration(node.parent) || !node.parent.name) return;
+    const isStatic = Boolean(ts.getModifiers(node)?.some(item => item.kind === ts.SyntaxKind.StaticKeyword));
+    const symbol = symbolOf(name);
+    const classSymbol = symbolOf(node.parent.name);
+    if (!symbol || !classSymbol) return;
+      const className = abiSymbols.get(classSymbol) ?? renamedSymbols.get(classSymbol) ?? node.parent.name.text;
+      const classTypeParameters = node.parent.typeParameters ?? [];
+      const classTypeArguments = classTypeParameters.map(parameter => ts.factory.createTypeReferenceNode(parameter.name.text, undefined));
+      const frameTypeParameters = isStatic ? [...(node.typeParameters ?? [])] : [...classTypeParameters, ...(node.typeParameters ?? [])];
+      asyncFunctionDeclarations.push({
+        name,
+        declaration: node,
+        body,
+        parameters: node.parameters,
+        typeParameters: node.typeParameters,
+        frameTypeParameters: frameTypeParameters.length ? frameTypeParameters : undefined,
+        modifiers: node.modifiers,
+        symbol,
+        receiverType: isStatic ? undefined : ts.factory.createTypeReferenceNode(className, classTypeArguments.length ? classTypeArguments : undefined),
+        method: node,
+      });
+  };
   const collect = (node: ts.Node): void => {
-    if (ts.isFunctionDeclaration(node) && node.name && node.body && functionHasAsyncModifier(node)) {
-      const symbol = symbolOf(node.name);
-      if (symbol) asyncFunctionDeclarations.push({ name: node.name, declaration: node, body: node.body, parameters: node.parameters, typeParameters: node.typeParameters, frameTypeParameters: node.typeParameters, modifiers: node.modifiers, symbol });
-    }
-    if (ts.isMethodDeclaration(node) && node.body && ts.isIdentifier(node.name) && functionHasAsyncModifier(node)) {
-      if (!ts.isClassDeclaration(node.parent) || !node.parent.name) return;
-      const isStatic = Boolean(ts.getModifiers(node)?.some(item => item.kind === ts.SyntaxKind.StaticKeyword));
-      const symbol = symbolOf(node.name);
-      const classSymbol = symbolOf(node.parent.name);
-      if (symbol && classSymbol) {
-        const className = abiSymbols.get(classSymbol) ?? renamedSymbols.get(classSymbol) ?? node.parent.name.text;
-        const classTypeParameters = node.parent.typeParameters ?? [];
-        const classTypeArguments = classTypeParameters.map(parameter => ts.factory.createTypeReferenceNode(parameter.name.text, undefined));
-        const frameTypeParameters = isStatic ? [...(node.typeParameters ?? [])] : [...classTypeParameters, ...(node.typeParameters ?? [])];
-        asyncFunctionDeclarations.push({
-          name: node.name,
-          declaration: node,
-          body: node.body,
-          parameters: node.parameters,
-          typeParameters: node.typeParameters,
-          frameTypeParameters: frameTypeParameters.length ? frameTypeParameters : undefined,
-          modifiers: node.modifiers,
-          symbol,
-          receiverType: isStatic ? undefined : ts.factory.createTypeReferenceNode(className, classTypeArguments.length ? classTypeArguments : undefined),
-          method: node,
-        });
-      }
-    }
+    if (ts.isFunctionDeclaration(node) && node.name && node.body && functionHasAsyncModifier(node)) collectFunction(node, node.name, node.body);
+    if (ts.isMethodDeclaration(node) && node.body && ts.isIdentifier(node.name) && functionHasAsyncModifier(node)) collectMethod(node, node.name, node.body);
     ts.forEachChild(node, collect);
   };
   collect(entry.source);
@@ -966,12 +967,12 @@ const lowerSource = (entry: SourceEntry): string => {
         return binding;
       };
       for (const parameter of unit.parameters) addBinding(parameter.name as ts.Identifier, parameter.type, parameter);
+      const registerFrameName = (name: ts.Identifier, type?: ts.TypeNode): void => {
+        const symbol = symbolOf(name);
+        if (symbol && !frameBindings.has(symbol)) addBinding(name, type);
+      };
       const collectBindingIdentifiers = (name: ts.BindingName): void => {
-        if (ts.isIdentifier(name)) {
-          const symbol = symbolOf(name);
-          if (symbol && !frameBindings.has(symbol)) addBinding(name, undefined);
-          return;
-        }
+        if (ts.isIdentifier(name)) { registerFrameName(name); return; }
         for (const element of name.elements) {
           if (ts.isOmittedExpression(element)) continue;
           collectBindingIdentifiers(element.name);
@@ -979,12 +980,8 @@ const lowerSource = (entry: SourceEntry): string => {
       };
       const collectFrameBindings = (current: ts.Node): void => {
         if (ts.isFunctionLike(current) && current !== node) return;
-        if (ts.isVariableDeclaration(current)) {
-          if (ts.isIdentifier(current.name)) {
-            const symbol = symbolOf(current.name);
-            if (symbol && !frameBindings.has(symbol)) addBinding(current.name, current.type);
-          } else collectBindingIdentifiers(current.name);
-        }
+        if (ts.isVariableDeclaration(current) && ts.isIdentifier(current.name)) registerFrameName(current.name, current.type);
+        if (ts.isVariableDeclaration(current) && !ts.isIdentifier(current.name)) collectBindingIdentifiers(current.name);
         ts.forEachChild(current, collectFrameBindings);
       };
       collectFrameBindings(body);
@@ -1003,29 +1000,35 @@ const lowerSource = (entry: SourceEntry): string => {
         }
         return { native, isVoid };
       };
-      const classifyAwait = (statement: ts.Statement): AsyncAwaitPoint | undefined => {
-        let awaitExpression: ts.AwaitExpression | undefined;
-        let kind: AsyncAwaitKind | undefined;
-        let target: ts.Expression | ts.Identifier | undefined;
-        if (ts.isExpressionStatement(statement) && ts.isAwaitExpression(statement.expression)) {
-          awaitExpression = statement.expression; kind = "expression";
-        } else if (ts.isExpressionStatement(statement) && ts.isBinaryExpression(statement.expression)
-          && statement.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isAwaitExpression(statement.expression.right)) {
-          awaitExpression = statement.expression.right; kind = "assignment"; target = statement.expression.left;
-        } else if (ts.isVariableStatement(statement)) {
-          const awaitedDeclarations = statement.declarationList.declarations.filter(item => Boolean(item.initializer && ts.isAwaitExpression(item.initializer)));
-          if (awaitedDeclarations.length) {
-            if (statement.declarationList.declarations.length !== 1 || awaitedDeclarations.length !== 1) {
-              throw new Error(`${lineAndColumn(source, statement.getStart(source))}: BQ2014: an awaited variable declaration must be the only declaration in its statement`);
-            }
-            const declaration = required(awaitedDeclarations[0], "awaitedDeclarations[0]");
-            if (!ts.isIdentifier(declaration.name) || !declaration.initializer || !ts.isAwaitExpression(declaration.initializer)) return undefined;
-            awaitExpression = declaration.initializer; kind = "variable"; target = declaration.name;
-          }
-        } else if (ts.isReturnStatement(statement) && statement.expression && ts.isAwaitExpression(statement.expression)) {
-          awaitExpression = statement.expression; kind = "return";
+      interface AwaitSyntax {
+        readonly awaitExpression: ts.AwaitExpression;
+        readonly kind: AsyncAwaitKind;
+        readonly target?: ts.Expression | ts.Identifier | undefined;
+      }
+      const variableAwaitSyntax = (statement: ts.VariableStatement): AwaitSyntax | undefined => {
+        const awaitedDeclarations = statement.declarationList.declarations.filter(item => Boolean(item.initializer && ts.isAwaitExpression(item.initializer)));
+        if (!awaitedDeclarations.length) return undefined;
+        if (statement.declarationList.declarations.length !== 1 || awaitedDeclarations.length !== 1) {
+          throw new Error(`${lineAndColumn(source, statement.getStart(source))}: BQ2014: an awaited variable declaration must be the only declaration in its statement`);
         }
-        if (!awaitExpression || !kind) return undefined;
+        const declaration = required(awaitedDeclarations[0], "awaitedDeclarations[0]");
+        if (!ts.isIdentifier(declaration.name) || !declaration.initializer || !ts.isAwaitExpression(declaration.initializer)) return undefined;
+        return { awaitExpression: declaration.initializer, kind: "variable", target: declaration.name };
+      };
+      const awaitSyntax = (statement: ts.Statement): AwaitSyntax | undefined => {
+        if (ts.isExpressionStatement(statement) && ts.isAwaitExpression(statement.expression)) return { awaitExpression: statement.expression, kind: "expression" };
+        if (ts.isExpressionStatement(statement) && ts.isBinaryExpression(statement.expression)
+          && statement.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isAwaitExpression(statement.expression.right))
+          return { awaitExpression: statement.expression.right, kind: "assignment", target: statement.expression.left };
+        if (ts.isVariableStatement(statement)) return variableAwaitSyntax(statement);
+        if (ts.isReturnStatement(statement) && statement.expression && ts.isAwaitExpression(statement.expression))
+          return { awaitExpression: statement.expression, kind: "return" };
+        return undefined;
+      };
+      const classifyAwait = (statement: ts.Statement): AsyncAwaitPoint | undefined => {
+        const syntax = awaitSyntax(statement);
+        if (!syntax) return undefined;
+        const { awaitExpression, kind, target } = syntax;
         const awaited = awaitResult(awaitExpression);
         const point: AsyncAwaitPoint = {
           await: awaitExpression,
@@ -1040,10 +1043,8 @@ const lowerSource = (entry: SourceEntry): string => {
       };
       const collectAwaitPoints = (current: ts.Node): void => {
         if (ts.isFunctionLike(current) && current !== node) return;
-        if (ts.isStatement(current)) {
-          const point = classifyAwait(current);
-          if (point) awaitPoints.set(current, point);
-        }
+        const point = ts.isStatement(current) ? classifyAwait(current) : undefined;
+        if (point && ts.isStatement(current)) awaitPoints.set(current, point);
         ts.forEachChild(current, collectAwaitPoints);
       };
       collectAwaitPoints(body);
@@ -1080,16 +1081,10 @@ const lowerSource = (entry: SourceEntry): string => {
         if (ts.isPrivateIdentifier(current)) {
           throw new Error(`${lineAndColumn(source, current.getStart(source))}: BQ2034: ECMAScript private fields cannot be accessed from a native coroutine resume function\n  hint: Use a TypeScript private/protected field or explicit accessor method.`);
         }
-        if (ts.isShorthandPropertyAssignment(current)) {
-          const symbol = symbolOf(current.name);
-          const binding = symbol && frameBindings.get(symbol);
-          if (binding) return ts.factory.createPropertyAssignment(current.name.text, bindingAccess(binding));
-        }
-        if (ts.isIdentifier(current)) {
-          const symbol = symbolOf(current);
-          const binding = symbol && frameBindings.get(symbol);
-          if (binding) return bindingAccess(binding);
-        }
+        const symbol = ts.isShorthandPropertyAssignment(current) ? symbolOf(current.name) : ts.isIdentifier(current) ? symbolOf(current) : undefined;
+        const binding = symbol && frameBindings.get(symbol);
+        if (binding && ts.isShorthandPropertyAssignment(current)) return ts.factory.createPropertyAssignment(current.name.text, bindingAccess(binding));
+        if (binding && ts.isIdentifier(current)) return bindingAccess(binding);
         return ts.visitEachChild(current, frameReferenceVisitor, context);
       };
       const rewrite = <T extends ts.Node>(current: T): T => {
@@ -1118,6 +1113,25 @@ const lowerSource = (entry: SourceEntry): string => {
         if (ts.isPropertyAccessExpression(expression)) return literalOrStaticReference(expression.expression);
         return false;
       };
+      const verifyBinaryAwait = (parent: ts.BinaryExpression, current: ts.Node, awaitExpression: ts.AwaitExpression): void => {
+        const shortCircuit = parent.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
+          || parent.operatorToken.kind === ts.SyntaxKind.BarBarToken
+          || parent.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken;
+        if (shortCircuit && current === parent.right) {
+          throw new Error(`${lineAndColumn(source, awaitExpression.getStart(source))}: BQ2018: await after a short-circuit operand requires expression-value spilling`);
+        }
+        if (current === parent.right && !literalOrStaticReference(parent.left)) {
+          throw new Error(`${lineAndColumn(source, awaitExpression.getStart(source))}: BQ2018: an effectful expression is evaluated before this await\n  hint: Move the await into a temporary declaration so Baguette can preserve exact evaluation order.`);
+        }
+      };
+      const verifyCallAwait = (parent: ts.CallExpression | ts.NewExpression, current: ts.Node, awaitExpression: ts.AwaitExpression): void => {
+    
+        const args = parent.arguments ?? ts.factory.createNodeArray<ts.Expression>();
+        const argumentIndex = args.findIndex(item => item === current || item.pos <= current.pos && current.end <= item.end);
+        if (argumentIndex >= 0 && (!literalOrStaticReference(parent.expression) || args.slice(0, argumentIndex).some(item => !literalOrStaticReference(item)))) {
+            throw new Error(`${lineAndColumn(source, awaitExpression.getStart(source))}: BQ2018: an effectful call operand is evaluated before this await\n  hint: Split the preceding call operands into explicitly typed temporaries.`);
+        }
+      };
       const assertAwaitEvaluationOrder = (awaitExpression: ts.AwaitExpression, root: ts.Node): void => {
         const ancestry: ts.Node[] = [];
         const findPath = (current: ts.Node): boolean => {
@@ -1133,25 +1147,9 @@ const lowerSource = (entry: SourceEntry): string => {
         for (let index = 0; index + 1 < ancestry.length; index++) {
           const current = required(ancestry[index], "ancestry[index]");
           const parent = required(ancestry[index + 1], "ancestry[index + 1]");
-          if (ts.isBinaryExpression(parent)) {
-            const shortCircuit = parent.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
-              || parent.operatorToken.kind === ts.SyntaxKind.BarBarToken
-              || parent.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken;
-            if (shortCircuit && current === parent.right) {
-              throw new Error(`${lineAndColumn(source, awaitExpression.getStart(source))}: BQ2018: await after a short-circuit operand requires expression-value spilling`);
-            }
-            if (current === parent.right && !literalOrStaticReference(parent.left)) {
-              throw new Error(`${lineAndColumn(source, awaitExpression.getStart(source))}: BQ2018: an effectful expression is evaluated before this await\n  hint: Move the await into a temporary declaration so Baguette can preserve exact evaluation order.`);
-            }
-          } else if (ts.isCallExpression(parent) || ts.isNewExpression(parent)) {
-            const args = parent.arguments ?? ts.factory.createNodeArray<ts.Expression>();
-            const argumentIndex = args.findIndex(item => item === current || item.pos <= current.pos && current.end <= item.end);
-            if (argumentIndex >= 0) {
-              if (!literalOrStaticReference(parent.expression) || args.slice(0, argumentIndex).some(item => !literalOrStaticReference(item))) {
-                throw new Error(`${lineAndColumn(source, awaitExpression.getStart(source))}: BQ2018: an effectful call operand is evaluated before this await\n  hint: Split the preceding call operands into explicitly typed temporaries.`);
-              }
-            }
-          } else if (ts.isConditionalExpression(parent) && current !== parent.condition) {
+          if (ts.isBinaryExpression(parent)) verifyBinaryAwait(parent, current, awaitExpression);
+          if (ts.isCallExpression(parent) || ts.isNewExpression(parent)) verifyCallAwait(parent, current, awaitExpression);
+          if (ts.isConditionalExpression(parent) && current !== parent.condition) {
             throw new Error(`${lineAndColumn(source, awaitExpression.getStart(source))}: BQ2018: await inside a conditional branch requires condition-value spilling`);
           }
         }
@@ -1165,74 +1163,76 @@ const lowerSource = (entry: SourceEntry): string => {
       };
       const rewriteReturnsVisitor: ts.Visitor = current => {
         if (ts.isFunctionLike(current)) return current;
-        if (ts.isReturnStatement(current)) {
-          if (result.isVoid) return resolveAndReturn(current.expression);
-          if (!current.expression) throw new Error(`${lineAndColumn(source, current.getStart(source))}: BQ2011: non-void async return requires a value`);
-          return resolveAndReturn(current.expression);
-        }
+        if (ts.isReturnStatement(current) && !result.isVoid && !current.expression) throw new Error(`${lineAndColumn(source, current.getStart(source))}: BQ2011: non-void async return requires a value`);
+        if (ts.isReturnStatement(current)) return resolveAndReturn(current.expression);
         return ts.visitEachChild(current, rewriteReturnsVisitor, context);
       };
-      const lowerOrdinaryStatement = (statement: ts.Statement): readonly ts.Statement[] => {
-        if (ts.isVariableStatement(statement)) {
-          const assignments: ts.Statement[] = [];
-          const lowerBindingAssignment = (name: ts.BindingName, value: ts.Expression): void => {
-            if (ts.isIdentifier(name)) {
-              const symbol = symbolOf(name);
-              const binding = symbol && frameBindings.get(symbol);
-              if (!binding) throw new Error(`${lineAndColumn(source, name.getStart(source))}: BQ2012: cannot find coroutine local ${name.text}`);
-              assignments.push(ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(bindingAccess(binding), ts.SyntaxKind.EqualsToken, value)));
-              return;
-            }
-            if (ts.isArrayBindingPattern(name)) {
-              name.elements.forEach((element, index) => {
-                if (ts.isOmittedExpression(element)) return;
-                if (element.dotDotDotToken || element.initializer) {
-                  throw new Error(`${lineAndColumn(source, element.getStart(source))}: BQ2021: destructuring defaults and rest bindings need dedicated native lowering\n  hint: Split this binding into explicit indexed assignments.`);
-                }
-                lowerBindingAssignment(element.name, ts.factory.createElementAccessExpression(value, ts.factory.createNumericLiteral(index)));
-              });
-              return;
-            }
-            for (const element of name.elements) {
+      const requiredFrameBinding = (name: ts.Identifier, description: string): AsyncFrameBinding => {
+        const symbol = symbolOf(name);
+        const binding = symbol && frameBindings.get(symbol);
+        if (!binding) throw new Error(`${lineAndColumn(source, name.getStart(source))}: BQ2012: cannot find ${description} ${name.text}`);
+        return binding;
+      };
+      const lowerVariables = (statement: ts.VariableStatement): readonly ts.Statement[] => {
+        const assignments: ts.Statement[] = [];
+        const lowerBindingAssignment = (name: ts.BindingName, value: ts.Expression): void => {
+          if (ts.isIdentifier(name)) {
+            const binding = requiredFrameBinding(name, "coroutine local");
+            assignments.push(ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(bindingAccess(binding), ts.SyntaxKind.EqualsToken, value)));
+            return;
+          }
+          if (ts.isArrayBindingPattern(name)) {
+            name.elements.forEach((element, index) => {
+              if (ts.isOmittedExpression(element)) return;
               if (element.dotDotDotToken || element.initializer) {
-                throw new Error(`${lineAndColumn(source, element.getStart(source))}: BQ2021: destructuring defaults and rest bindings need dedicated native lowering\n  hint: Split this binding into explicit property assignments.`);
+                throw new Error(`${lineAndColumn(source, element.getStart(source))}: BQ2021: destructuring defaults and rest bindings need dedicated native lowering\n  hint: Split this binding into explicit indexed assignments.`);
               }
-              const property = element.propertyName ?? (ts.isIdentifier(element.name) ? element.name : undefined);
-              if (!property || ts.isComputedPropertyName(property)) {
-                throw new Error(`${lineAndColumn(source, element.getStart(source))}: BQ2022: computed destructuring keys have no fixed native field offset\n  hint: Use a statically named property or an explicit map lookup.`);
-              }
-              const access = ts.isIdentifier(property) || ts.isPrivateIdentifier(property)
-                ? ts.factory.createPropertyAccessExpression(value, property.text)
-                : ts.factory.createElementAccessExpression(value, property);
-              lowerBindingAssignment(element.name, access);
+              lowerBindingAssignment(element.name, ts.factory.createElementAccessExpression(value, ts.factory.createNumericLiteral(index)));
+            });
+            return;
+          }
+          for (const element of name.elements) {
+            if (element.dotDotDotToken || element.initializer) {
+              throw new Error(`${lineAndColumn(source, element.getStart(source))}: BQ2021: destructuring defaults and rest bindings need dedicated native lowering\n  hint: Split this binding into explicit property assignments.`);
             }
-          };
-          for (const declaration of statement.declarationList.declarations) {
-            if (!declaration.initializer) continue;
-            if (ts.isIdentifier(declaration.name)) {
-              lowerBindingAssignment(declaration.name, rewrite(declaration.initializer));
+            const property = element.propertyName ?? (ts.isIdentifier(element.name) ? element.name : undefined);
+            if (!property || ts.isComputedPropertyName(property)) {
+              throw new Error(`${lineAndColumn(source, element.getStart(source))}: BQ2022: computed destructuring keys have no fixed native field offset\n  hint: Use a statically named property or an explicit map lookup.`);
+            }
+            const access = ts.isIdentifier(property) || ts.isPrivateIdentifier(property)
+              ? ts.factory.createPropertyAccessExpression(value, property.text)
+              : ts.factory.createElementAccessExpression(value, property);
+            lowerBindingAssignment(element.name, access);
+          }
+        };
+        for (const declaration of statement.declarationList.declarations) {
+          if (!declaration.initializer) continue;
+          if (ts.isIdentifier(declaration.name)) {
+            lowerBindingAssignment(declaration.name, rewrite(declaration.initializer));
+            continue;
+          }
+          const rewrittenInitializer = rewrite(declaration.initializer);
+          const initializerType = declaration.initializer.pos >= 0
+            ? nativeTypeNode(checker.getTypeAtLocation(declaration.initializer), declaration.initializer)
+            : undefined;
+          if (!initializerType) {
+            if (literalOrStaticReference(rewrittenInitializer)) {
+              lowerBindingAssignment(declaration.name, rewrittenInitializer);
               continue;
             }
-            const rewrittenInitializer = rewrite(declaration.initializer);
-            const initializerType = declaration.initializer.pos >= 0
-              ? nativeTypeNode(checker.getTypeAtLocation(declaration.initializer), declaration.initializer)
-              : undefined;
-            if (!initializerType) {
-              if (literalOrStaticReference(rewrittenInitializer)) {
-                lowerBindingAssignment(declaration.name, rewrittenInitializer);
-                continue;
-              }
-              const position = declaration.name.pos >= 0 ? declaration.name.getStart(source) : node.getStart(source);
-              throw new Error(`${lineAndColumn(source, position)}: BQ2023: destructuring source has no concrete native shape\n  hint: Annotate the source with a fixed array, tuple, class or interface type.`);
-            }
-            const captureField = `__bq_destructure_${expressionCaptureIndex++}`;
-            expressionCaptureFields.push({ field: captureField, type: initializerType });
-            const captureAccess = ts.factory.createPropertyAccessExpression(frameIdentifier, captureField);
-            assignments.push(ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(captureAccess, ts.SyntaxKind.EqualsToken, rewrittenInitializer)));
-            lowerBindingAssignment(declaration.name, captureAccess);
+            const position = declaration.name.pos >= 0 ? declaration.name.getStart(source) : node.getStart(source);
+            throw new Error(`${lineAndColumn(source, position)}: BQ2023: destructuring source has no concrete native shape\n  hint: Annotate the source with a fixed array, tuple, class or interface type.`);
           }
-          return assignments;
+          const captureField = `__bq_destructure_${expressionCaptureIndex++}`;
+          expressionCaptureFields.push({ field: captureField, type: initializerType });
+          const captureAccess = ts.factory.createPropertyAccessExpression(frameIdentifier, captureField);
+          assignments.push(ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(captureAccess, ts.SyntaxKind.EqualsToken, rewrittenInitializer)));
+          lowerBindingAssignment(declaration.name, captureAccess);
         }
+        return assignments;
+      };
+      const lowerOrdinaryStatement = (statement: ts.Statement): readonly ts.Statement[] => {
+        if (ts.isVariableStatement(statement)) return lowerVariables(statement);
         const returnsLowered = ts.visitNode(statement, rewriteReturnsVisitor) as ts.Statement;
         return [rewrite(returnsLowered)];
       };
@@ -1243,8 +1243,7 @@ const lowerSource = (entry: SourceEntry): string => {
         if (point.kind === "expression") return [ts.factory.createExpressionStatement(resumed)];
         if (point.kind === "return") return [resolveAndReturn(point.resultVoid ? undefined : resumed)];
         if (point.kind === "variable" && point.target && ts.isIdentifier(point.target)) {
-          const binding = frameBindings.get(required(symbolOf(point.target), "symbolOf(point.target)"));
-          if (!binding) throw new Error(`${lineAndColumn(source, point.target.getStart(source))}: BQ2012: cannot find coroutine local ${point.target.text}`);
+          const binding = requiredFrameBinding(point.target, "coroutine local");
           return [ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(bindingAccess(binding), ts.SyntaxKind.EqualsToken, resumed))];
         }
         if (point.kind === "assignment" && point.target) {
