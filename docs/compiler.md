@@ -1,18 +1,28 @@
 # Compiler pipeline
 
-Baguette builds a TypeScript programme in six stages.
+1. Resolve the configured TypeScript project, entry modules and intrinsics.
+2. Invoke the pinned Bake frontend to validate and lower the source.
+3. Validate the emitted source against Baguette's supported subset and ABI.
+4. Lower types, control flow and supported asynchronous operations to the
+   WebAssembly model.
+5. Apply memory settings and variant-specific preludes.
+6. Write WebAssembly, declarations and the build manifest.
 
-1. The configured TypeScript project, entry modules and intrinsic modules are isolated into the compilation boundary.
-2. The pinned Bake frontend validates that boundary and safely lowers supported wider TypeScript constructs into Baguette's deterministic subset.
-3. Baguette loads Bake's emitted source tree and remains the final validator for the supported language subset and configured ABI types.
-4. Types, control flow and asynchronous functions are lowered to Baguette's WebAssembly model.
-5. The selected prelude and memory settings are applied to each configured variant.
-6. WebAssembly, declarations and the build manifest are written to the configured output directories.
+Bake runs at compile time. Its intermediate source and report are written
+under `build/baguette-bake/`. Final output paths follow the configuration.
 
-Bake is a compile-time source dependency only. It does not add a runtime, interpreter or virtual machine to generated programmes. The original output paths in `baguette.config.json` remain authoritative; Bake's intermediate source and report are written below `build/baguette-bake/`.
-
-Unless `--skip-determinism-check` is supplied, Baguette repeats the generation pass and compares the result. Different bytes from the same input are treated as a build failure.
+By default, the compiler repeats generation and compares the resulting bytes.
+`--skip-determinism-check` disables that comparison.
 
 ## Modular WAT output
 
-`--emit-modular-wat` also emits a source tree for each variant under the generated directory. The directory structure follows the lowered input modules. Baguette uses its symbol ownership and ABI mapping to assign declarations to their original source modules. Module-wide declarations are in `module.wat`; compiler and runtime helpers without an input owner are in `runtime.wat`. `layout.json` records declaration order, allowing the consumer to assemble the exact original module. Type-only and fully inlined modules have no standalone declarations. The existing binary output remains available for compatibility and reference validation.
+`--emit-modular-wat` emits a source tree for each configured variant.
+Its directory structure follows the lowered input modules.
+
+`module.wat` contains module-wide declarations. `runtime.wat`
+contains compiler helpers without an input-module owner.
+`layout.json` records declaration order for assembly.
+
+Type-only and fully inlined modules may contain no standalone
+declarations. Binary output remains available for reference
+validation.
