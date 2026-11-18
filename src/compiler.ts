@@ -1215,11 +1215,11 @@ const lowerSource = (entry: SourceEntry): string => {
           const initializerType = declaration.initializer.pos >= 0
             ? nativeTypeNode(checker.getTypeAtLocation(declaration.initializer), declaration.initializer)
             : undefined;
+          if (!initializerType && literalOrStaticReference(rewrittenInitializer)) {
+            lowerBindingAssignment(declaration.name, rewrittenInitializer);
+            continue;
+          }
           if (!initializerType) {
-            if (literalOrStaticReference(rewrittenInitializer)) {
-              lowerBindingAssignment(declaration.name, rewrittenInitializer);
-              continue;
-            }
             const position = declaration.name.pos >= 0 ? declaration.name.getStart(source) : node.getStart(source);
             throw new Error(`${lineAndColumn(source, position)}: BQ2023: destructuring source has no concrete native shape\n  hint: Annotate the source with a fixed array, tuple, class or interface type.`);
           }
@@ -1314,7 +1314,14 @@ const lowerSource = (entry: SourceEntry): string => {
 
       const compileConditionalExpression = (expression: ts.Expression, trueState: number, falseState: number): number => {
         const awaitExpression = firstAwaitIn(expression);
-        if (awaitExpression) {
+        if (awaitExpression) return compileAwaitCondition(expression, awaitExpression, trueState, falseState);
+        const choose = ts.factory.createConditionalExpression(rewrite(expression), ts.factory.createToken(ts.SyntaxKind.QuestionToken), ts.factory.createNumericLiteral(trueState), ts.factory.createToken(ts.SyntaxKind.ColonToken), ts.factory.createNumericLiteral(falseState));
+        return allocateState([
+          ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(ts.factory.createPropertyAccessExpression(frameIdentifier, "__bq_state"), ts.SyntaxKind.EqualsToken, choose)),
+          ts.factory.createContinueStatement(),
+        ]);
+      };
+      const compileAwaitCondition = (expression: ts.Expression, awaitExpression: ts.AwaitExpression, trueState: number, falseState: number): number => {
           assertAwaitEvaluationOrder(awaitExpression, expression);
           const awaited = awaitResult(awaitExpression);
           if (awaited.isVoid) {
@@ -1334,12 +1341,6 @@ const lowerSource = (entry: SourceEntry): string => {
           const remainder = replaceNode(expression, awaitExpression, ts.factory.createPropertyAccessExpression(frameIdentifier, captureField));
           const remainderEntry = compileConditionalExpression(remainder, trueState, falseState);
           return compileAwait(point, remainderEntry);
-        }
-        const choose = ts.factory.createConditionalExpression(rewrite(expression), ts.factory.createToken(ts.SyntaxKind.QuestionToken), ts.factory.createNumericLiteral(trueState), ts.factory.createToken(ts.SyntaxKind.ColonToken), ts.factory.createNumericLiteral(falseState));
-        return allocateState([
-          ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(ts.factory.createPropertyAccessExpression(frameIdentifier, "__bq_state"), ts.SyntaxKind.EqualsToken, choose)),
-          ts.factory.createContinueStatement(),
-        ]);
       };
 
       let compileStatement: (statement: ts.Statement, next: number, loop?: LoopTargets) => number;
@@ -1348,15 +1349,171 @@ const lowerSource = (entry: SourceEntry): string => {
         for (let index = statements.length - 1; index >= 0; index--) entry = compileStatement(required(statements[index], "statements[index]"), entry, loop);
         return entry;
       };
+      const compileFor = (statement: ts.ForStatement, next: number): number => {
+        const conditionAnchor = allocateState();
+        const bodyAnchor = allocateState();
+        const incrementAnchor = allocateState();
+        const conditionEntry = statement.condition
+          ? compileConditionalExpression(statement.condition, bodyAnchor, next)
+          : allocateState(setStateAndContinue(bodyAnchor));
+        stateBodies.set(conditionAnchor, setStateAndContinue(conditionEntry));
+        const incrementEntry = statement.incrementor
+          ? compileStatement(ts.factory.createExpressionStatement(statement.incrementor), conditionAnchor)
+          : conditionAnchor;
+        stateBodies.set(incrementAnchor, setStateAndContinue(incrementEntry));
+        const bodyEntry = compileStatement(statement.statement, incrementAnchor, { breakState: next, continueState: incrementAnchor });
+        stateBodies.set(bodyAnchor, setStateAndContinue(bodyEntry));
+        if (!statement.initializer) return conditionAnchor;
+        if (ts.isVariableDeclarationList(statement.initializer)) {
+          return compileStatement(ts.factory.createVariableStatement(undefined, statement.initializer), conditionAnchor);
+        }
+        return compileStatement(ts.factory.createExpressionStatement(statement.initializer), conditionAnchor);
+      };
+      const compileBreak = (statement: ts.BreakStatement, loop?: LoopTargets): number => {
+        if (!loop) throw new Error(`${lineAndColumn(source, statement.getStart(source))}: BQ2015: break is not inside a lowered loop`);
+        return allocateState(setStateAndContinue(loop.breakState));
+      };
+      const compileContinue = (statement: ts.ContinueStatement, loop?: LoopTargets): number => {
+        if (!loop || loop.continueState === undefined) throw new Error(`${lineAndColumn(source, statement.getStart(source))}: BQ2016: continue is not inside a lowered loop`);
+        return allocateState(setStateAndContinue(loop.continueState));
+      };
+      const compileSwitch = (statement: ts.SwitchStatement, next: number, loop?: LoopTargets): number => {
+        const discriminantType = nativeTypeNode(checker.getTypeAtLocation(statement.expression), statement.expression);
+        if (!discriminantType) {
+          throw new Error(`${lineAndColumn(source, statement.expression.getStart(source))}: BQ2025: switch discriminant has no concrete native shape`);
+        }
+        const captureField = `__bq_switch_${expressionCaptureIndex++}`;
+        expressionCaptureFields.push({ field: captureField, type: discriminantType });
+        const captureAccess = ts.factory.createPropertyAccessExpression(frameIdentifier, captureField);
+        const clauseEntries = new Map<ts.CaseOrDefaultClause, number>();
+        let fallthroughState = next;
+        for (let index = statement.caseBlock.clauses.length - 1; index >= 0; index--) {
+          const clause = required(statement.caseBlock.clauses[index], "statement.caseBlock.clauses[index]");
+          const entry = compileSequence(clause.statements, fallthroughState, { breakState: next, continueState: loop?.continueState });
+          clauseEntries.set(clause, entry);
+          fallthroughState = entry;
+        }
+
+        // JavaScript evaluates case labels from top to bottom until one matches.
+        // Each label therefore receives its own resumable state. A label may
+        // suspend without evaluating later labels or losing the discriminant.
+        const defaultClause = statement.caseBlock.clauses.find(ts.isDefaultClause);
+        let dispatchEntry = defaultClause ? required(clauseEntries.get(defaultClause), "clauseEntries.get(defaultClause)") : next;
+        for (let index = statement.caseBlock.clauses.length - 1; index >= 0; index--) {
+          const clause = required(statement.caseBlock.clauses[index], "statement.caseBlock.clauses[index]");
+          if (!ts.isCaseClause(clause)) continue;
+          const labelField = `__bq_switch_case_${expressionCaptureIndex++}`;
+          expressionCaptureFields.push({ field: labelField, type: discriminantType });
+          const labelAccess = ts.factory.createPropertyAccessExpression(frameIdentifier, labelField);
+          const compareState = allocateState([
+            ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(
+              ts.factory.createPropertyAccessExpression(frameIdentifier, "__bq_state"),
+              ts.SyntaxKind.EqualsToken,
+              ts.factory.createConditionalExpression(
+                ts.factory.createBinaryExpression(captureAccess, ts.SyntaxKind.EqualsEqualsEqualsToken, labelAccess),
+                ts.factory.createToken(ts.SyntaxKind.QuestionToken),
+                ts.factory.createNumericLiteral(required(clauseEntries.get(clause), "clauseEntries.get(clause)")),
+                ts.factory.createToken(ts.SyntaxKind.ColonToken),
+                ts.factory.createNumericLiteral(dispatchEntry),
+              ),
+            )),
+            ts.factory.createContinueStatement(),
+          ]);
+          const assignLabel = ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(labelAccess, ts.SyntaxKind.EqualsToken, clause.expression));
+          dispatchEntry = compileStatement(assignLabel, compareState, loop);
+        }
+        const assignDiscriminant = ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(captureAccess, ts.SyntaxKind.EqualsToken, statement.expression));
+        return compileStatement(assignDiscriminant, dispatchEntry, loop);
+      };
+      const compileForOf = (statement: ts.ForOfStatement, next: number, loop?: LoopTargets): number => {
+        const iterableSourceType = checker.getTypeAtLocation(statement.expression);
+        const numericIndexType = checker.getIndexTypeOfType(iterableSourceType, ts.IndexKind.Number);
+        const lengthProperty = iterableSourceType.getProperty("length");
+        if (!numericIndexType || !lengthProperty) {
+          throw new Error(`${lineAndColumn(source, statement.expression.getStart(source))}: BQ2026: for-of currently requires a statically indexable value with numeric elements and length\n  hint: Use an Array, tuple or StaticArray, or lower the iterator explicitly.`);
+        }
+        const iterableType = nativeTypeNode(iterableSourceType, statement.expression);
+        if (!iterableType) throw new Error(`${lineAndColumn(source, statement.expression.getStart(source))}: BQ2026: for-of iterable has no concrete native shape`);
+        const iterableField = `__bq_forof_values_${expressionCaptureIndex++}`;
+        const indexField = `__bq_forof_index_${expressionCaptureIndex++}`;
+        expressionCaptureFields.push({ field: iterableField, type: iterableType });
+        expressionCaptureFields.push({ field: indexField, type: ts.factory.createTypeReferenceNode("i32", undefined) });
+        const iterableAccess = ts.factory.createPropertyAccessExpression(frameIdentifier, iterableField);
+        const indexAccess = ts.factory.createPropertyAccessExpression(frameIdentifier, indexField);
+        const elementAccess = ts.factory.createElementAccessExpression(iterableAccess, indexAccess);
+        const bindElementStatements: ts.Statement[] = [];
+        const bindForOfName = (name: ts.BindingName, value: ts.Expression): void => {
+          if (ts.isIdentifier(name)) {
+            const binding = requiredFrameBinding(name, "coroutine for-of local");
+            bindElementStatements.push(ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(bindingAccess(binding), ts.SyntaxKind.EqualsToken, value)));
+            return;
+          }
+          if (ts.isArrayBindingPattern(name)) {
+            name.elements.forEach((element, elementIndex) => {
+              if (ts.isOmittedExpression(element)) return;
+              if (element.dotDotDotToken || element.initializer) {
+                throw new Error(`${lineAndColumn(source, element.getStart(source))}: BQ2027: for-of destructuring defaults and rest require explicit native assignments`);
+              }
+              bindForOfName(element.name, ts.factory.createElementAccessExpression(value, ts.factory.createNumericLiteral(elementIndex)));
+            });
+            return;
+          }
+          for (const element of name.elements) {
+            if (element.dotDotDotToken || element.initializer) {
+              throw new Error(`${lineAndColumn(source, element.getStart(source))}: BQ2027: for-of destructuring defaults and rest require explicit native assignments`);
+            }
+            const property = element.propertyName ?? (ts.isIdentifier(element.name) ? element.name : undefined);
+            if (!property || ts.isComputedPropertyName(property)) {
+              throw new Error(`${lineAndColumn(source, element.getStart(source))}: BQ2022: computed destructuring keys have no fixed native field offset`);
+            }
+            const access = ts.isIdentifier(property) || ts.isPrivateIdentifier(property)
+              ? ts.factory.createPropertyAccessExpression(value, property.text)
+              : ts.factory.createElementAccessExpression(value, property);
+            bindForOfName(element.name, access);
+          }
+        };
+        if (ts.isVariableDeclarationList(statement.initializer) && statement.initializer.declarations.length !== 1) {
+          throw new Error(`${lineAndColumn(source, statement.initializer.getStart(source))}: BQ2027: for-of requires exactly one declaration`);
+        }
+        if (ts.isVariableDeclarationList(statement.initializer)) {
+          bindForOfName(required(statement.initializer.declarations[0], "statement.initializer.declarations[0]").name, elementAccess);
+        } else {
+          bindElementStatements.push(ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(rewrite(statement.initializer), ts.SyntaxKind.EqualsToken, elementAccess)));
+        }
+
+        const conditionAnchor = allocateState();
+        const bodyAnchor = allocateState();
+        const incrementAnchor = allocateState();
+        const condition = ts.factory.createBinaryExpression(indexAccess, ts.SyntaxKind.LessThanToken, ts.factory.createPropertyAccessExpression(iterableAccess, "length"));
+        stateBodies.set(conditionAnchor, [
+          ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(ts.factory.createPropertyAccessExpression(frameIdentifier, "__bq_state"), ts.SyntaxKind.EqualsToken,
+            ts.factory.createConditionalExpression(condition, ts.factory.createToken(ts.SyntaxKind.QuestionToken), ts.factory.createNumericLiteral(bodyAnchor), ts.factory.createToken(ts.SyntaxKind.ColonToken), ts.factory.createNumericLiteral(next)))),
+          ts.factory.createContinueStatement(),
+        ]);
+        stateBodies.set(incrementAnchor, [
+          ts.factory.createExpressionStatement(ts.factory.createPostfixIncrement(indexAccess)),
+          ...setStateAndContinue(conditionAnchor),
+        ]);
+        const bodyEntry = compileStatement(statement.statement, incrementAnchor, { breakState: next, continueState: incrementAnchor });
+        stateBodies.set(bodyAnchor, [
+          ...bindElementStatements,
+          ...setStateAndContinue(bodyEntry),
+        ]);
+        const initialiseIndex = allocateState([
+          ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(indexAccess, ts.SyntaxKind.EqualsToken, ts.factory.createNumericLiteral(0))),
+          ...setStateAndContinue(conditionAnchor),
+        ]);
+        const assignIterable = ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(iterableAccess, ts.SyntaxKind.EqualsToken, statement.expression));
+        return compileStatement(assignIterable, initialiseIndex, loop);
+      };
       compileStatement = (statement: ts.Statement, next: number, loop?: LoopTargets): number => {
         const point = awaitPoints.get(statement);
         if (point) return compileAwait(point, next);
         if (ts.isBlock(statement)) return compileSequence(statement.statements, next, loop);
         if (ts.isEmptyStatement(statement)) return next;
-        if ((ts.isExpressionStatement(statement) || ts.isReturnStatement(statement) || ts.isVariableStatement(statement)) && containsNestedAwait(statement)) {
-          const nested = compileNestedExpressionAwait(statement, next, loop);
-          if (nested !== undefined) return nested;
-        }
+        const nested = (ts.isExpressionStatement(statement) || ts.isReturnStatement(statement) || ts.isVariableStatement(statement)) && containsNestedAwait(statement)
+          ? compileNestedExpressionAwait(statement, next, loop) : undefined;
+        if (nested !== undefined) return nested;
         if (ts.isReturnStatement(statement)) {
           const body = result.isVoid
             ? [...resolveAndReturn(statement.expression).statements]
@@ -1388,168 +1545,12 @@ const lowerSource = (entry: SourceEntry): string => {
           stateBodies.set(bodyAnchor, setStateAndContinue(bodyEntry));
           return bodyAnchor;
         }
-        if (ts.isForStatement(statement)) {
-          const conditionAnchor = allocateState();
-          const bodyAnchor = allocateState();
-          const incrementAnchor = allocateState();
-          const conditionEntry = statement.condition
-            ? compileConditionalExpression(statement.condition, bodyAnchor, next)
-            : allocateState(setStateAndContinue(bodyAnchor));
-          stateBodies.set(conditionAnchor, setStateAndContinue(conditionEntry));
-          const incrementEntry = statement.incrementor
-            ? compileStatement(ts.factory.createExpressionStatement(statement.incrementor), conditionAnchor)
-            : conditionAnchor;
-          stateBodies.set(incrementAnchor, setStateAndContinue(incrementEntry));
-          const bodyEntry = compileStatement(statement.statement, incrementAnchor, { breakState: next, continueState: incrementAnchor });
-          stateBodies.set(bodyAnchor, setStateAndContinue(bodyEntry));
-          if (!statement.initializer) return conditionAnchor;
-          if (ts.isVariableDeclarationList(statement.initializer)) {
-            return compileStatement(ts.factory.createVariableStatement(undefined, statement.initializer), conditionAnchor);
-          }
-          return compileStatement(ts.factory.createExpressionStatement(statement.initializer), conditionAnchor);
-        }
-        if (ts.isBreakStatement(statement)) {
-          if (!loop) throw new Error(`${lineAndColumn(source, statement.getStart(source))}: BQ2015: break is not inside a lowered loop`);
-          return allocateState(setStateAndContinue(loop.breakState));
-        }
-        if (ts.isContinueStatement(statement)) {
-          if (!loop || loop.continueState === undefined) throw new Error(`${lineAndColumn(source, statement.getStart(source))}: BQ2016: continue is not inside a lowered loop`);
-          return allocateState(setStateAndContinue(loop.continueState));
-        }
-        if (ts.isSwitchStatement(statement)) {
-          const discriminantType = nativeTypeNode(checker.getTypeAtLocation(statement.expression), statement.expression);
-          if (!discriminantType) {
-            throw new Error(`${lineAndColumn(source, statement.expression.getStart(source))}: BQ2025: switch discriminant has no concrete native shape`);
-          }
-          const captureField = `__bq_switch_${expressionCaptureIndex++}`;
-          expressionCaptureFields.push({ field: captureField, type: discriminantType });
-          const captureAccess = ts.factory.createPropertyAccessExpression(frameIdentifier, captureField);
-          const clauseEntries = new Map<ts.CaseOrDefaultClause, number>();
-          let fallthroughState = next;
-          for (let index = statement.caseBlock.clauses.length - 1; index >= 0; index--) {
-            const clause = required(statement.caseBlock.clauses[index], "statement.caseBlock.clauses[index]");
-            const entry = compileSequence(clause.statements, fallthroughState, { breakState: next, continueState: loop?.continueState });
-            clauseEntries.set(clause, entry);
-            fallthroughState = entry;
-          }
-
-          // JavaScript evaluates case labels from top to bottom until one matches.
-          // Each label therefore receives its own resumable state. A label may
-          // suspend without evaluating later labels or losing the discriminant.
-          const defaultClause = statement.caseBlock.clauses.find(ts.isDefaultClause);
-          let dispatchEntry = defaultClause ? required(clauseEntries.get(defaultClause), "clauseEntries.get(defaultClause)") : next;
-          for (let index = statement.caseBlock.clauses.length - 1; index >= 0; index--) {
-            const clause = required(statement.caseBlock.clauses[index], "statement.caseBlock.clauses[index]");
-            if (!ts.isCaseClause(clause)) continue;
-            const labelField = `__bq_switch_case_${expressionCaptureIndex++}`;
-            expressionCaptureFields.push({ field: labelField, type: discriminantType });
-            const labelAccess = ts.factory.createPropertyAccessExpression(frameIdentifier, labelField);
-            const compareState = allocateState([
-              ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(
-                ts.factory.createPropertyAccessExpression(frameIdentifier, "__bq_state"),
-                ts.SyntaxKind.EqualsToken,
-                ts.factory.createConditionalExpression(
-                  ts.factory.createBinaryExpression(captureAccess, ts.SyntaxKind.EqualsEqualsEqualsToken, labelAccess),
-                  ts.factory.createToken(ts.SyntaxKind.QuestionToken),
-                  ts.factory.createNumericLiteral(required(clauseEntries.get(clause), "clauseEntries.get(clause)")),
-                  ts.factory.createToken(ts.SyntaxKind.ColonToken),
-                  ts.factory.createNumericLiteral(dispatchEntry),
-                ),
-              )),
-              ts.factory.createContinueStatement(),
-            ]);
-            const assignLabel = ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(labelAccess, ts.SyntaxKind.EqualsToken, clause.expression));
-            dispatchEntry = compileStatement(assignLabel, compareState, loop);
-          }
-          const assignDiscriminant = ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(captureAccess, ts.SyntaxKind.EqualsToken, statement.expression));
-          return compileStatement(assignDiscriminant, dispatchEntry, loop);
-        }
-        if (ts.isForOfStatement(statement)) {
-          const iterableSourceType = checker.getTypeAtLocation(statement.expression);
-          const numericIndexType = checker.getIndexTypeOfType(iterableSourceType, ts.IndexKind.Number);
-          const lengthProperty = iterableSourceType.getProperty("length");
-          if (!numericIndexType || !lengthProperty) {
-            throw new Error(`${lineAndColumn(source, statement.expression.getStart(source))}: BQ2026: for-of currently requires a statically indexable value with numeric elements and length\n  hint: Use an Array, tuple or StaticArray, or lower the iterator explicitly.`);
-          }
-          const iterableType = nativeTypeNode(iterableSourceType, statement.expression);
-          if (!iterableType) throw new Error(`${lineAndColumn(source, statement.expression.getStart(source))}: BQ2026: for-of iterable has no concrete native shape`);
-          const iterableField = `__bq_forof_values_${expressionCaptureIndex++}`;
-          const indexField = `__bq_forof_index_${expressionCaptureIndex++}`;
-          expressionCaptureFields.push({ field: iterableField, type: iterableType });
-          expressionCaptureFields.push({ field: indexField, type: ts.factory.createTypeReferenceNode("i32", undefined) });
-          const iterableAccess = ts.factory.createPropertyAccessExpression(frameIdentifier, iterableField);
-          const indexAccess = ts.factory.createPropertyAccessExpression(frameIdentifier, indexField);
-          const elementAccess = ts.factory.createElementAccessExpression(iterableAccess, indexAccess);
-          const bindElementStatements: ts.Statement[] = [];
-          const bindForOfName = (name: ts.BindingName, value: ts.Expression): void => {
-            if (ts.isIdentifier(name)) {
-              const symbol = symbolOf(name);
-              const binding = symbol && frameBindings.get(symbol);
-              if (!binding) throw new Error(`${lineAndColumn(source, name.getStart(source))}: BQ2012: cannot find coroutine for-of local ${name.text}`);
-              bindElementStatements.push(ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(bindingAccess(binding), ts.SyntaxKind.EqualsToken, value)));
-              return;
-            }
-            if (ts.isArrayBindingPattern(name)) {
-              name.elements.forEach((element, elementIndex) => {
-                if (ts.isOmittedExpression(element)) return;
-                if (element.dotDotDotToken || element.initializer) {
-                  throw new Error(`${lineAndColumn(source, element.getStart(source))}: BQ2027: for-of destructuring defaults and rest require explicit native assignments`);
-                }
-                bindForOfName(element.name, ts.factory.createElementAccessExpression(value, ts.factory.createNumericLiteral(elementIndex)));
-              });
-              return;
-            }
-            for (const element of name.elements) {
-              if (element.dotDotDotToken || element.initializer) {
-                throw new Error(`${lineAndColumn(source, element.getStart(source))}: BQ2027: for-of destructuring defaults and rest require explicit native assignments`);
-              }
-              const property = element.propertyName ?? (ts.isIdentifier(element.name) ? element.name : undefined);
-              if (!property || ts.isComputedPropertyName(property)) {
-                throw new Error(`${lineAndColumn(source, element.getStart(source))}: BQ2022: computed destructuring keys have no fixed native field offset`);
-              }
-              const access = ts.isIdentifier(property) || ts.isPrivateIdentifier(property)
-                ? ts.factory.createPropertyAccessExpression(value, property.text)
-                : ts.factory.createElementAccessExpression(value, property);
-              bindForOfName(element.name, access);
-            }
-          };
-          if (ts.isVariableDeclarationList(statement.initializer)) {
-            if (statement.initializer.declarations.length !== 1) {
-              throw new Error(`${lineAndColumn(source, statement.initializer.getStart(source))}: BQ2027: for-of requires exactly one declaration`);
-            }
-            bindForOfName(required(statement.initializer.declarations[0], "statement.initializer.declarations[0]").name, elementAccess);
-          } else {
-            bindElementStatements.push(ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(rewrite(statement.initializer), ts.SyntaxKind.EqualsToken, elementAccess)));
-          }
-
-          const conditionAnchor = allocateState();
-          const bodyAnchor = allocateState();
-          const incrementAnchor = allocateState();
-          const condition = ts.factory.createBinaryExpression(indexAccess, ts.SyntaxKind.LessThanToken, ts.factory.createPropertyAccessExpression(iterableAccess, "length"));
-          stateBodies.set(conditionAnchor, [
-            ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(ts.factory.createPropertyAccessExpression(frameIdentifier, "__bq_state"), ts.SyntaxKind.EqualsToken,
-              ts.factory.createConditionalExpression(condition, ts.factory.createToken(ts.SyntaxKind.QuestionToken), ts.factory.createNumericLiteral(bodyAnchor), ts.factory.createToken(ts.SyntaxKind.ColonToken), ts.factory.createNumericLiteral(next)))),
-            ts.factory.createContinueStatement(),
-          ]);
-          stateBodies.set(incrementAnchor, [
-            ts.factory.createExpressionStatement(ts.factory.createPostfixIncrement(indexAccess)),
-            ...setStateAndContinue(conditionAnchor),
-          ]);
-          const bodyEntry = compileStatement(statement.statement, incrementAnchor, { breakState: next, continueState: incrementAnchor });
-          stateBodies.set(bodyAnchor, [
-            ...bindElementStatements,
-            ...setStateAndContinue(bodyEntry),
-          ]);
-          const initialiseIndex = allocateState([
-            ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(indexAccess, ts.SyntaxKind.EqualsToken, ts.factory.createNumericLiteral(0))),
-            ...setStateAndContinue(conditionAnchor),
-          ]);
-          const assignIterable = ts.factory.createExpressionStatement(ts.factory.createBinaryExpression(iterableAccess, ts.SyntaxKind.EqualsToken, statement.expression));
-          return compileStatement(assignIterable, initialiseIndex, loop);
-        }
-        if (ts.isForInStatement(statement)) {
-          if (containsNestedAwait(statement)) throw new Error(`${lineAndColumn(source, statement.getStart(source))}: BQ2017: await inside for-in requires dynamic property-iterator lowering`);
-        }
+        if (ts.isForStatement(statement)) return compileFor(statement, next);
+        if (ts.isBreakStatement(statement)) return compileBreak(statement, loop);
+        if (ts.isContinueStatement(statement)) return compileContinue(statement, loop);
+        if (ts.isSwitchStatement(statement)) return compileSwitch(statement, next, loop);
+        if (ts.isForOfStatement(statement)) return compileForOf(statement, next, loop);
+        if (ts.isForInStatement(statement) && containsNestedAwait(statement)) throw new Error(`${lineAndColumn(source, statement.getStart(source))}: BQ2017: await inside for-in requires dynamic property-iterator lowering`);
         if (containsNestedAwait(statement)) {
           throw new Error(`${lineAndColumn(source, statement.getStart(source))}: BQ2002: await expression requires a supported statement or control-flow lowering`);
         }
