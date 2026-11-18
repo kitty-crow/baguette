@@ -1625,57 +1625,50 @@ const lowerSource = (entry: SourceEntry): string => {
           unit.name, unit.typeParameters, unit.parameters, taskType, wrapperBody);
       return { support, wrapper: ts.visitEachChild(wrapper, visit, context) as ts.FunctionDeclaration | ts.MethodDeclaration };
     };
+    const findAsyncUnit = (name: ts.Identifier, location: ts.Node, kind: string, method?: ts.MethodDeclaration): AsyncUnit => {
+      const symbol = symbolOf(name);
+      const unit = symbol && asyncFunctionDeclarations.find(item => item.symbol === symbol && (!method || item.method === method));
+      if (!unit) throw new Error(`${lineAndColumn(source, location.getStart(source))}: BQ2013: missing async ${kind} unit`);
+      return unit;
+    };
+    const namespaceName = (name: ts.Identifier, node: ts.Node, kind: string): ts.Identifier => {
+      const target = symbolOf(name);
+      const replacement = target && (abiSymbols.get(target) ?? renamedSymbols.get(target));
+      if (!replacement) throw new Error(`${lineAndColumn(source, node.getStart(source))}: namespace ${kind} ${node.getText(source)} does not resolve to a flattened Baguette symbol`);
+      return ts.factory.createIdentifier(replacement);
+    };
+    const flattenedName = (name: ts.Identifier): string | undefined => {
+      const symbol = symbolOf(name);
+      return symbol && (abiSymbols.get(symbol) ?? renamedSymbols.get(symbol));
+    };
     visit = node => {
       if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) return undefined;
       if (ts.isFunctionDeclaration(node) && node.name && node.body && functionHasAsyncModifier(node) && asyncLowering === "state-machine") {
-        const symbol = symbolOf(node.name);
-        const unit = symbol && asyncFunctionDeclarations.find(item => item.symbol === symbol);
-        if (!unit) throw new Error(`${lineAndColumn(source, node.getStart(source))}: BQ2013: missing async function unit`);
-        const lowered = lowerAsyncFunction(unit);
+        const lowered = lowerAsyncFunction(findAsyncUnit(node.name, node, "function"));
         return [...lowered.support, lowered.wrapper];
       }
-      if (ts.isVariableStatement(node) && node.declarationList.declarations.length === 1) {
-        const declaration = required(node.declarationList.declarations[0], "node.declarationList.declarations[0]");
-        if (ts.isIdentifier(declaration.name) && declaration.initializer
-          && (ts.isArrowFunction(declaration.initializer) || ts.isFunctionExpression(declaration.initializer))
-          && functionHasAsyncModifier(declaration.initializer) && asyncLowering === "state-machine") {
-          const symbol = symbolOf(declaration.name);
-          const unit = symbol && asyncFunctionDeclarations.find(item => item.symbol === symbol);
-          if (!unit) throw new Error(`${lineAndColumn(source, declaration.getStart(source))}: BQ2013: missing async expression unit`);
-          const lowered = lowerAsyncFunction(unit);
-          return [...lowered.support, lowered.wrapper];
-        }
+      const declaration = ts.isVariableStatement(node) && node.declarationList.declarations.length === 1 ? node.declarationList.declarations[0] : undefined;
+      if (declaration && ts.isIdentifier(declaration.name) && declaration.initializer
+        && (ts.isArrowFunction(declaration.initializer) || ts.isFunctionExpression(declaration.initializer))
+        && functionHasAsyncModifier(declaration.initializer) && asyncLowering === "state-machine") {
+        const lowered = lowerAsyncFunction(findAsyncUnit(declaration.name, declaration, "expression"));
+        return [...lowered.support, lowered.wrapper];
       }
       if (ts.isMethodDeclaration(node) && node.body && ts.isIdentifier(node.name) && functionHasAsyncModifier(node) && asyncLowering === "state-machine") {
-        const symbol = symbolOf(node.name);
-        const unit = symbol && asyncFunctionDeclarations.find(item => item.symbol === symbol && item.method === node);
-        if (!unit) throw new Error(`${lineAndColumn(source, node.getStart(source))}: BQ2013: missing async method unit`);
-        const lowered = lowerAsyncFunction(unit);
+        const lowered = lowerAsyncFunction(findAsyncUnit(node.name, node, "method", node));
         asyncSupportStatements.push(...lowered.support);
         return lowered.wrapper;
       }
       if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression) && namespaceImportSymbol(node.expression)) {
-        const target = symbolOf(node.name);
-        const replacement = target && (abiSymbols.get(target) ?? renamedSymbols.get(target));
-        if (!replacement) throw new Error(`${lineAndColumn(source, node.getStart(source))}: namespace member ${node.getText(source)} does not resolve to a flattened Baguette symbol`);
-        return ts.factory.createIdentifier(replacement);
+        return namespaceName(node.name, node, "member");
       }
       if (ts.isQualifiedName(node) && ts.isIdentifier(node.left) && namespaceImportSymbol(node.left)) {
-        const target = symbolOf(node.right);
-        const replacement = target && (abiSymbols.get(target) ?? renamedSymbols.get(target));
-        if (!replacement) throw new Error(`${lineAndColumn(source, node.getStart(source))}: namespace type ${node.getText(source)} does not resolve to a flattened Baguette symbol`);
-        return ts.factory.createIdentifier(replacement);
+        return namespaceName(node.right, node, "type");
       }
-      if (ts.isFunctionDeclaration(node) && !node.body && node.name) {
-        const symbol = symbolOf(node.name);
-        const implementation = symbol?.declarations?.some(declaration => ts.isFunctionDeclaration(declaration) && Boolean(declaration.body));
-        if (implementation) return undefined;
-      }
-      if (ts.isMethodDeclaration(node) && !node.body) {
-        const symbol = symbolOf(node.name);
-        const implementation = symbol?.declarations?.some(declaration => ts.isMethodDeclaration(declaration) && Boolean(declaration.body));
-        if (implementation) return undefined;
-      }
+      const overloadSymbol = (ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) && !node.body && node.name ? symbolOf(node.name) : undefined;
+      const hasImplementation = overloadSymbol?.declarations?.some(declaration =>
+        (ts.isFunctionDeclaration(node) && ts.isFunctionDeclaration(declaration) || ts.isMethodDeclaration(node) && ts.isMethodDeclaration(declaration)) && Boolean(declaration.body));
+      if (hasImplementation) return undefined;
       if (ts.isVariableDeclaration(node) && !node.type) {
         const inferred = inferredTypeFor(node.name, node.initializer);
         return ts.visitEachChild(ts.factory.updateVariableDeclaration(node, node.name, node.exclamationToken, inferred, node.initializer), visit, context);
@@ -1701,16 +1694,11 @@ const lowerSource = (entry: SourceEntry): string => {
         return ts.visitEachChild(ts.factory.updateGetAccessorDeclaration(node, node.modifiers, node.name, node.parameters, inferredReturnTypeFor(node), node.body), visit, context);
       }
       if (ts.isIdentifier(node)) {
-        const symbol = symbolOf(node);
-        const replacement = symbol && (abiSymbols.get(symbol) ?? renamedSymbols.get(symbol));
-        if (replacement && replacement !== node.text) return ts.factory.createIdentifier(replacement);
-        return node;
+        const replacement = flattenedName(node);
+        return replacement && replacement !== node.text ? ts.factory.createIdentifier(replacement) : node;
       }
-      if (ts.isShorthandPropertyAssignment(node)) {
-        const symbol = symbolOf(node.name);
-        const replacement = symbol && (abiSymbols.get(symbol) ?? renamedSymbols.get(symbol));
-        if (replacement && replacement !== node.name.text) return ts.factory.createPropertyAssignment(node.name.text, ts.factory.createIdentifier(replacement));
-      }
+      const shorthand = ts.isShorthandPropertyAssignment(node) ? flattenedName(node.name) : undefined;
+      if (shorthand && ts.isShorthandPropertyAssignment(node) && shorthand !== node.name.text) return ts.factory.createPropertyAssignment(node.name.text, ts.factory.createIdentifier(shorthand));
       if (ts.isTypeReferenceNode(node) || node.kind === ts.SyntaxKind.NumberKeyword || node.kind === ts.SyntaxKind.BigIntKeyword || node.kind === ts.SyntaxKind.BooleanKeyword) return ts.visitEachChild(assemblyType(node as ts.TypeNode), visit, context);
       if (ts.isBigIntLiteral(node)) {
         const literal = node.getText(source);
@@ -1723,9 +1711,7 @@ const lowerSource = (entry: SourceEntry): string => {
         return narrowed ? ts.factory.createTypeAssertion(narrowed, expression) : expression;
       }
       if (ts.isSatisfiesExpression(node)) return ts.visitNode(node.expression, visit);
-      if (ts.isVariableStatement(node) && node.declarationList.declarations.length === 1) {
-        const declaration = required(node.declarationList.declarations[0], "node.declarationList.declarations[0]");
-        if (ts.isIdentifier(declaration.name) && declaration.initializer && ts.isArrowFunction(declaration.initializer)) {
+      if (ts.isVariableStatement(node) && declaration && ts.isIdentifier(declaration.name) && declaration.initializer && ts.isArrowFunction(declaration.initializer)) {
           const symbol = symbolOf(declaration.name);
           const isAbi = Boolean(symbol && abiSymbols.has(symbol));
           const arrow = declaration.initializer;
@@ -1734,18 +1720,15 @@ const lowerSource = (entry: SourceEntry): string => {
             stripExportModifiers(node.modifiers, isAbi), undefined, declaration.name, arrow.typeParameters, arrow.parameters, arrow.type, body,
           );
           return ts.visitEachChild(functionNode, visit, context);
-        }
       }
       if (ts.isFunctionDeclaration(node) && node.name) {
         const symbol = symbolOf(node.name);
         return ts.visitEachChild(ts.factory.updateFunctionDeclaration(node, stripExportModifiers(node.modifiers, Boolean(symbol && abiSymbols.has(symbol))), node.asteriskToken, node.name, node.typeParameters, node.parameters, node.type ?? inferredReturnTypeFor(node), node.body), visit, context);
       }
-      if (ts.canHaveModifiers(node) && ts.getModifiers(node)?.some(item => item.kind === ts.SyntaxKind.ExportKeyword)) {
-        const clone = ts.visitEachChild(node, visit, context) as ts.Node;
-        if (ts.canHaveModifiers(clone)) ts.setTextRange(clone, node);
-        return clone;
-      }
-      return ts.visitEachChild(node, visit, context);
+      const preserveRange = ts.canHaveModifiers(node) && ts.getModifiers(node)?.some(item => item.kind === ts.SyntaxKind.ExportKeyword);
+      const clone = ts.visitEachChild(node, visit, context);
+      if (preserveRange && ts.canHaveModifiers(clone)) ts.setTextRange(clone, node);
+      return clone;
     };
     return file => {
       const lowered = ts.visitEachChild(file, visit, context);
@@ -1799,14 +1782,22 @@ const instantiateImports = (threaded: boolean): WebAssembly.Imports => {
         maximum: config.memory?.maximumPages ?? 32768,
         shared: threaded,
       });
-    } else if (item.kind === "function") namespace[item.name] = (item.name === "abort" ? (() => { throw new Error("WebAssembly abort import invoked during Baguette verification"); }) : (() => 0)) as WebAssembly.ImportValue;
-    else if (item.kind === "global") namespace[item.name] = new WebAssembly.Global({ value: "i32", mutable: false }, 0);
-    else if (item.kind === "table") namespace[item.name] = new WebAssembly.Table({ element: "anyfunc", initial: 1 });
+    }
+    if (item.kind === "function") namespace[item.name] = (item.name === "abort" ? (() => { throw new Error("WebAssembly abort import invoked during Baguette verification"); }) : (() => 0)) as WebAssembly.ImportValue;
+    if (item.kind === "global") namespace[item.name] = new WebAssembly.Global({ value: "i32", mutable: false }, 0);
+    if (item.kind === "table") namespace[item.name] = new WebAssembly.Table({ element: "anyfunc", initial: 1 });
   }
   return imports;
 };
 const argumentValue = (value: number | string): number | bigint => typeof value === "number" ? value : BigInt(value);
+const verifyFunction = (native: Record<string, WebAssembly.ExportValue>, wasmPath: string, name: string, args?: Array<number | string>, expected?: number | string): void => {
+  const fn = native[name];
+  if (typeof fn !== "function") throw new Error(`${relative(wasmPath)} lacks verification function ${name}`);
+  const result = (fn as CallableFunction)(...(args ?? []).map(argumentValue));
+  if (expected !== undefined && result !== argumentValue(expected)) throw new Error(`${relative(wasmPath)} ${name} returned ${String(result)}`);
+};
 const verifyModule = async (wasmPath: string, threaded: boolean): Promise<Omit<VariantResult, "file" | "bytes" | "sha256" | "threaded">> => {
+  // Inspect the actual native module before instantiating it with the declared host capabilities.
   const bytes = await readBytes(wasmPath);
   if (!WebAssembly.validate(bytes)) throw new Error(`${relative(wasmPath)} is not valid WebAssembly`);
   const module = new WebAssembly.Module(bytes);
@@ -1816,25 +1807,13 @@ const verifyModule = async (wasmPath: string, threaded: boolean): Promise<Omit<V
   const exports = WebAssembly.Module.exports(module);
   const exportMap = new Map(exports.map(item => [item.name, item.kind]));
   for (const required of abiFunctions) if (exportMap.get(required.name) !== "function") throw new Error(`${relative(wasmPath)} is missing native function export ${required.name}`);
-  if (!config.abi?.allowNonFunctionExports) {
-    const unexpectedKinds = exports.filter(item => item.kind !== "function");
-    if (unexpectedKinds.length) throw new Error(`${relative(wasmPath)} unexpectedly exports non-function state: ${unexpectedKinds.map(item => `${item.name}:${item.kind}`).join(", ")}`);
-  }
+  const unexpectedKinds = config.abi?.allowNonFunctionExports ? [] : exports.filter(item => item.kind !== "function");
+  if (unexpectedKinds.length) throw new Error(`${relative(wasmPath)} unexpectedly exports non-function state: ${unexpectedKinds.map(item => `${item.name}:${item.kind}`).join(", ")}`);
   const instance = new WebAssembly.Instance(module, instantiateImports(threaded));
   const native = instance.exports as Record<string, WebAssembly.ExportValue>;
   const verification = config.abi?.verify;
-  if (verification?.init) {
-    const init = native[verification.init];
-    if (typeof init !== "function") throw new Error(`${relative(wasmPath)} lacks verification function ${verification.init}`);
-    const result = (init as CallableFunction)(...(verification.initArgs ?? []).map(argumentValue));
-    if (verification.initExpected !== undefined && result !== argumentValue(verification.initExpected)) throw new Error(`${relative(wasmPath)} ${verification.init} returned ${String(result)}`);
-  }
-  if (verification?.valid) {
-    const valid = native[verification.valid];
-    if (typeof valid !== "function") throw new Error(`${relative(wasmPath)} lacks verification function ${verification.valid}`);
-    const result = (valid as CallableFunction)(...(verification.validArgs ?? []).map(argumentValue));
-    if (verification.validExpected !== undefined && result !== argumentValue(verification.validExpected)) throw new Error(`${relative(wasmPath)} ${verification.valid} returned ${String(result)}`);
-  }
+  if (verification?.init) verifyFunction(native, wasmPath, verification.init, verification.initArgs, verification.initExpected);
+  if (verification?.valid) verifyFunction(native, wasmPath, verification.valid, verification.validArgs, verification.validExpected);
   for (const test of config.abi?.tests ?? []) {
     const fn = native[test.function];
     if (typeof fn !== "function") throw new Error(`${relative(wasmPath)} lacks ABI test function ${test.function}`);
@@ -1850,12 +1829,13 @@ const hostInterface = (): string => {
   return lines.join("\n");
 };
 
-if (validateOnly) {
+const reportValidation = (): void => {
   console.log(`Baguette ${BAGUETTE_VERSION} validated a ${sourceEntries.length}-module TypeScript programme from ${config.entries.length} entry point(s)`);
   console.log(`  configuration: ${relative(configPath)}`);
   console.log(`  native ABI exports: ${abiFunctions.length}`);
   console.log("  execution model: ahead-of-time WebAssembly; no JavaScript VM or bytecode interpreter");
-} else {
+};
+const buildOutputs = async (): Promise<void> => {
   await fs.rm(generated, { recursive: true, force: true });
   await fs.mkdir(generated, { recursive: true });
   await fs.mkdir(output, { recursive: true });
@@ -1914,14 +1894,15 @@ if (validateOnly) {
       modularLayouts[variant.name] = relative(layout);
     }
     await optimise(rawPath, wasmPath);
-    if (!skipDeterminism) {
+    const verifyDeterminism = async (): Promise<void> => {
       console.log(`Baguette: verifying deterministic rebuild for ${variant.name}`);
       await asc(rawRepeatPath);
       await optimise(rawRepeatPath, optimisedRepeatPath);
       const first = await readBytes(wasmPath), second = await readBytes(optimisedRepeatPath);
       if (first.byteLength !== second.byteLength || first.some((byte, index) => byte !== second[index])) throw new Error(`${variant.name} is not deterministic across identical Baguette builds`);
       console.log(`Baguette: deterministic rebuild verified for ${variant.name}`);
-    }
+    };
+    if (!skipDeterminism) await verifyDeterminism();
     const verification = await verifyModule(wasmPath, Boolean(variant.threaded));
     const bytes = await readBytes(wasmPath);
     variantResults[`${variant.name}.wasm`] = { file: relative(wasmPath), bytes: bytes.byteLength, sha256: await sha256(bytes), threaded: Boolean(variant.threaded), ...verification };
@@ -1995,7 +1976,10 @@ if (validateOnly) {
   for (const variant of variants) { const result = required(variantResults[`${variant.name}.wasm`], "variantResults[`${variant.name}.wasm`]"); console.log(`  ${result.file}  ${result.bytes} bytes  sha256 ${result.sha256}`); }
   console.log(`  deterministic rebuild: ${skipDeterminism ? "skipped" : "verified"}`);
   console.log("  native module instantiation and configured ABI checks: verified");
-}
+};
+
+if (validateOnly) reportValidation();
+if (!validateOnly) await buildOutputs();
 
 // The compiler is an explicit build process. Terminating here prevents Bun or
 // a backend shared-memory instance from retaining the event loop after all
