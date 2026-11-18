@@ -498,7 +498,7 @@ const promiseType = (type: ts.Type, location: ts.Node, depth: number): ts.TypeNo
   const innerNode = nativeTypeNode(inner, location, depth + 1);
   return innerNode ? ts.factory.createTypeReferenceNode("__BqTask", [innerNode]) : null;
 };
-// Materialise only representations supported by AssemblyScript; unsupported or recursive types fail closed.
+// Materialise only AssemblyScript storage representations. Alias resolution precedes primitive widening; nullable references and callable types require structural conversion. A depth bound prevents recursive type expansion.
 const nativeTypeNode = (type: ts.Type, location: ts.Node, depth = 0): ts.TypeNode | null => {
   if (depth > 16) return null;
   const aliasName = (type.aliasSymbol ?? null) ? required(type.aliasSymbol ?? null, "type alias").getName() : null;
@@ -681,6 +681,7 @@ for (const entry of sourceEntries) {
     const symbol = symbolOf(name);
     if (symbol) asyncFunctionDeclarations.push({ name, declaration: node, body, parameters: node.parameters, typeParameters: node.typeParameters ?? [], frameTypeParameters: node.typeParameters ?? [], modifiers: node.modifiers ?? [], symbol, receiverType: null, method: null });
   };
+  // Instance coroutine frames carry the enclosing class's generic parameters and a receiver; static methods need neither receiver nor class parameters.
   const collectMethod = (node: ts.MethodDeclaration, name: ts.Identifier, body: ts.Block): void => {
     if (!ts.isClassDeclaration(node.parent)) return;
     const parentName = node.parent.name ?? null;
@@ -1024,10 +1025,10 @@ const lowerSource = (entry: SourceEntry): string => {
         if (binding && ts.isIdentifier(current)) return bindingAccess(binding);
         return ts.visitEachChild(current, frameReferenceVisitor, context);
       };
-      const rewrite = <T extends ts.Node>(current: T): T => {
-        const framed = required(ts.visitNode(current, frameReferenceVisitor) ?? null, "framed node") as T;
-        return required(ts.visitNode(framed, visit) ?? null, "rewritten node") as T;
-      };
+      const rewrite = (current: ts.Expression): ts.Expression =>
+        ts.visitNode(ts.visitNode(current, frameReferenceVisitor, ts.isExpression), visit, ts.isExpression);
+      const rewriteStatement = (current: ts.Statement): ts.Statement =>
+        ts.visitNode(ts.visitNode(current, frameReferenceVisitor, ts.isStatement), visit, ts.isStatement);
       const firstAwaitIn = (root: ts.Node): ts.AwaitExpression | null => {
         let found: ts.AwaitExpression | null = null;
         const scan = (current: ts.Node): void => {
@@ -1039,9 +1040,9 @@ const lowerSource = (entry: SourceEntry): string => {
         scan(root);
         return found;
       };
-      const replaceNode = <T extends ts.Node>(root: T, target: ts.Node, replacement: ts.Expression): T => {
+      const replaceNode = <T extends ts.Node>(root: ts.Node, target: ts.Node, replacement: ts.Expression, test: (node: ts.Node) => node is T): T => {
         const replacer: ts.Visitor<ts.Node, ts.Node> = current => current === target ? replacement : ts.visitEachChild(current, replacer, context);
-        return required(ts.visitNode(root, replacer) ?? null, "replacement node") as T;
+        return ts.visitNode(root, replacer, test);
       };
       const literalOrStaticReference = (expression: ts.Expression): boolean => {
         while (ts.isParenthesizedExpression(expression) || ts.isNonNullExpression(expression) || ts.isAsExpression(expression) || ts.isTypeAssertionExpression(expression)) expression = expression.expression;
@@ -1172,7 +1173,7 @@ const lowerSource = (entry: SourceEntry): string => {
       const lowerOrdinaryStatement = (statement: ts.Statement): readonly ts.Statement[] => {
         if (ts.isVariableStatement(statement)) return lowerVariables(statement);
         const returnsLowered = ts.visitNode(statement, rewriteReturnsVisitor, ts.isStatement);
-        return [rewrite(returnsLowered)];
+        return [rewriteStatement(returnsLowered)];
       };
 
       const awaitTaskAccess = (point: AsyncAwaitPoint): ts.PropertyAccessExpression => ts.factory.createPropertyAccessExpression(frameIdentifier, point.field);
@@ -1246,7 +1247,7 @@ const lowerSource = (entry: SourceEntry): string => {
         };
         allAwaitPoints.push(point);
         const captureAccess = ts.factory.createPropertyAccessExpression(frameIdentifier, captureField);
-        const remainder = replaceNode(statement, awaitExpression, captureAccess);
+        const remainder = replaceNode(statement, awaitExpression, captureAccess, ts.isStatement);
         const remainderEntry = compileStatement(remainder, next, loop);
         return compileAwait(point, remainderEntry);
       };
@@ -1278,7 +1279,7 @@ const lowerSource = (entry: SourceEntry): string => {
             field: `__bq_await_${awaitIndex++}`,
           };
           allAwaitPoints.push(point);
-          const remainder = replaceNode(expression, awaitExpression, ts.factory.createPropertyAccessExpression(frameIdentifier, captureField));
+          const remainder = replaceNode(expression, awaitExpression, ts.factory.createPropertyAccessExpression(frameIdentifier, captureField), ts.isExpression);
           const remainderEntry = compileConditionalExpression(remainder, trueState, falseState);
           return compileAwait(point, remainderEntry);
       };
@@ -1456,10 +1457,11 @@ const lowerSource = (entry: SourceEntry): string => {
           ? compileNestedExpressionAwait(statement, next, loop) : null;
         if (nested !== null) return nested;
         if (ts.isReturnStatement(statement)) {
+          const expression = statement.expression ?? null;
           const body = result.isVoid
-            ? [...resolveAndReturn(statement.expression).statements]
-            : statement.expression
-              ? [...resolveAndReturn(statement.expression).statements]
+            ? [...resolveAndReturn(expression).statements]
+            : expression
+              ? [...resolveAndReturn(expression).statements]
               : (() => { throw new Error(`${lineAndColumn(source, statement.getStart(source))}: BQ2011: non-void async return requires a value`); })();
           return allocateState(body);
         }
@@ -1563,8 +1565,7 @@ const lowerSource = (entry: SourceEntry): string => {
       const support = [frameClass].map(statement => ts.visitEachChild(statement, visit, context) as ts.Statement);
       const wrapper = unit.method
         ? nativeMethod({name: unit.method.name, modifiers: withoutAsyncModifier(unit.modifiers, false), question: Boolean(unit.method.questionToken ?? null), typeParameters: unit.typeParameters, parameters: unit.parameters, returns: taskType, body: wrapperBody})
-        : ts.factory.createFunctionDeclaration(withoutAsyncModifier(unit.modifiers, Boolean(abiSymbols.has(symbol))), undefined,
-          unit.name, unit.typeParameters, unit.parameters, taskType, wrapperBody);
+        : nativeFunction({name: unit.name, modifiers: withoutAsyncModifier(unit.modifiers, Boolean(abiSymbols.has(symbol))), typeParameters: unit.typeParameters, parameters: unit.parameters, returns: taskType, body: wrapperBody});
       return { support, wrapper: ts.visitEachChild(wrapper, visit, context) as ts.FunctionDeclaration | ts.MethodDeclaration };
     };
     const findAsyncUnit = (name: ts.Identifier, location: ts.Node, kind: string, method: ts.MethodDeclaration | null = null): AsyncUnit => {
@@ -1614,7 +1615,7 @@ const lowerSource = (entry: SourceEntry): string => {
       const overloadSymbol = overloadName && !hasBody ? symbolOf(overloadName) : null;
       const hasImplementation = (overloadSymbol ? overloadSymbol.declarations ?? [] : []).some(declaration =>
         (ts.isFunctionDeclaration(node) && ts.isFunctionDeclaration(declaration) || ts.isMethodDeclaration(node) && ts.isMethodDeclaration(declaration)) && Boolean(declaration.body ?? null));
-      if (hasImplementation) return undefined;
+      if (hasImplementation) return [];
       if ((ts.isVariableDeclaration(node) || ts.isParameter(node) || ts.isPropertyDeclaration(node)) && !(node.type ?? null)) {
         const inferred = inferredTypeFor(node.name, node.initializer ?? null);
         return ts.visitEachChild(inferred ? annotateBinding(node, inferred) : node, visit, context);
