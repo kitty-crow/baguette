@@ -5,7 +5,7 @@
       "name": "KITTYX",
       "repository": "kittycrow-kittyx/kittyx",
       "path": "vendor/kittyx",
-      "commit": "6d6dbac796d59e8ea07c52cbcd3a0b7f181da163",
+      "commit": "076774c11103c996910c0f939deff9164e5f12d9",
       "relationship": "contract",
       "direct": true,
       "updatePolicy": "pull-request"
