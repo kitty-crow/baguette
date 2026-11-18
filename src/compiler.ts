@@ -262,7 +262,7 @@ const unresolvedRuntimeImports: string[] = [];
 for (const [absolute, source] of sourceByAbsolute) {
   const items: string[] = [];
   for (const statement of source.statements) {
-    if ((ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement)) && statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier)) {
+    if ((!ts.isImportDeclaration(statement) && !ts.isExportDeclaration(statement)) || !statement.moduleSpecifier || !ts.isStringLiteral(statement.moduleSpecifier)) continue;
       const dependency = resolveDependency(source, statement.moduleSpecifier.text);
       if (dependency) {
         items.push(dependency);
@@ -272,7 +272,6 @@ for (const [absolute, source] of sourceByAbsolute) {
         ? Boolean(statement.importClause?.isTypeOnly || statement.importClause?.namedBindings && ts.isNamedImports(statement.importClause.namedBindings) && statement.importClause.namedBindings.elements.every(item => item.isTypeOnly))
         : statement.isTypeOnly;
       if (!importIsTypeOnly) unresolvedRuntimeImports.push(`${relative(source.fileName)} imports external runtime module ${JSON.stringify(statement.moduleSpecifier.text)}`);
-    }
   }
   dependencies.set(absolute, items);
 }
@@ -332,6 +331,47 @@ const containsAwait = (node: ts.Node): boolean => {
 const validateSource = (entry: SourceEntry): void => {
   const errors: BaguetteDiagnostic[] = [];
   const fail = (node: ts.Node, code: string, message: string, hint?: string): void => { errors.push({ node, code, message, hint }); };
+  const validateVariable = (name: ts.Identifier): void => {
+    const inferred = checker.getTypeAtLocation(name);
+    if (inferred.flags & ts.TypeFlags.Any) {
+      fail(name, "BQ1001", `inferred type of ${name.text} is any and has no deterministic native memory shape`, "Add a concrete type annotation or replace the value with a tagged union or opaque handle.");
+    }
+    if (inferred.flags & ts.TypeFlags.Unknown) {
+      fail(name, "BQ1002", `inferred type of ${name.text} is unknown and cannot be materialised`, "Narrow the value to a concrete native type before storing it.");
+    }
+  };
+  const validateParameter = (name: ts.Identifier): void => {
+    const inferred = checker.getTypeAtLocation(name);
+    if (inferred.flags & ts.TypeFlags.Any) {
+      fail(name, "BQ1001", `parameter ${name.text} is implicitly any`, "Give the parameter an explicit native type. Baguette will not insert a dynamic JavaScript value representation.");
+    }
+    if (inferred.flags & ts.TypeFlags.Unknown) {
+      fail(name, "BQ1002", `parameter ${name.text} remains unknown at the native boundary`, "Use a concrete type, tagged union, interface/class layout or numeric handle.");
+    }
+  };
+  const validateAsync = (node: ts.Node): void => {
+    const topLevelExpression = (ts.isArrowFunction(node) || ts.isFunctionExpression(node))
+      && ts.isVariableDeclaration(node.parent)
+      && ts.isIdentifier(node.parent.name)
+      && ts.isVariableDeclarationList(node.parent.parent)
+      && node.parent.parent.declarations.length === 1
+      && ts.isVariableStatement(node.parent.parent.parent)
+      && ts.isSourceFile(node.parent.parent.parent.parent);
+    const classMethod = ts.isMethodDeclaration(node)
+      && Boolean(node.body)
+      && ts.isIdentifier(node.name)
+      && ts.isClassDeclaration(node.parent)
+      && Boolean(node.parent.name);
+    if (!(ts.isFunctionDeclaration(node) && node.name && node.body) && !topLevelExpression && !classMethod) {
+      fail(node, "BQ2003", "the current coroutine lowering supports named async functions, top-level async arrows/function expressions, and static or instance async methods", "Move local async closures into an explicit named function until their lexical capture shapes are materialised.");
+    }
+  };
+  const validateRuntimeName = (node: ts.Identifier): void => {
+    const symbol = checker.getSymbolAtLocation(node);
+    const declarations = symbol?.declarations ?? [];
+    const isLocal = declarations.some(declaration => !declaration.getSourceFile().isDeclarationFile);
+    if (!isLocal) fail(node, "BQ1102", `${node.text} requires a JavaScript host runtime`, "Use an explicit numeric host capability or a native Wasm support routine instead.");
+  };
   const walk = (node: ts.Node): void => {
     if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
       fail(node, "BQ1101", "runtime-computed imports cannot be ahead-of-time compiled", "Use a statically resolvable import or expose the operation as an explicit host capability.");
@@ -351,45 +391,10 @@ const validateSource = (entry: SourceEntry): void => {
     if (isExplicitUnknown(node)) {
       fail(node, "BQ1002", "`unknown` cannot be stored or passed until its native shape is known", "Narrow the value before this declaration, or use an explicit tagged union/handle whose layout Baguette can compile.");
     }
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && !node.type) {
-      const inferred = checker.getTypeAtLocation(node.name);
-      if (inferred.flags & ts.TypeFlags.Any) {
-        fail(node.name, "BQ1001", `inferred type of ${node.name.text} is any and has no deterministic native memory shape`, "Add a concrete type annotation or replace the value with a tagged union or opaque handle.");
-      } else if (inferred.flags & ts.TypeFlags.Unknown) {
-        fail(node.name, "BQ1002", `inferred type of ${node.name.text} is unknown and cannot be materialised`, "Narrow the value to a concrete native type before storing it.");
-      }
-    }
-    if (ts.isParameter(node) && ts.isIdentifier(node.name) && !node.type) {
-      const inferred = checker.getTypeAtLocation(node.name);
-      if (inferred.flags & ts.TypeFlags.Any) {
-        fail(node.name, "BQ1001", `parameter ${node.name.text} is implicitly any`, "Give the parameter an explicit native type. Baguette will not insert a dynamic JavaScript value representation.");
-      } else if (inferred.flags & ts.TypeFlags.Unknown) {
-        fail(node.name, "BQ1002", `parameter ${node.name.text} remains unknown at the native boundary`, "Use a concrete type, tagged union, interface/class layout or numeric handle.");
-      }
-    }
-    if (functionHasAsyncModifier(node) && asyncLowering === "state-machine") {
-      const topLevelExpression = (ts.isArrowFunction(node) || ts.isFunctionExpression(node))
-        && ts.isVariableDeclaration(node.parent)
-        && ts.isIdentifier(node.parent.name)
-        && ts.isVariableDeclarationList(node.parent.parent)
-        && node.parent.parent.declarations.length === 1
-        && ts.isVariableStatement(node.parent.parent.parent)
-        && ts.isSourceFile(node.parent.parent.parent.parent);
-      const classMethod = ts.isMethodDeclaration(node)
-        && Boolean(node.body)
-        && ts.isIdentifier(node.name)
-        && ts.isClassDeclaration(node.parent)
-        && Boolean(node.parent.name);
-      if (!(ts.isFunctionDeclaration(node) && node.name && node.body) && !topLevelExpression && !classMethod) {
-        fail(node, "BQ2003", "the current coroutine lowering supports named async functions, top-level async arrows/function expressions, and static or instance async methods", "Move local async closures into an explicit named function until their lexical capture shapes are materialised.");
-      }
-    }
-    if (ts.isIdentifier(node) && impossibleRuntimeIdentifiers.has(node.text)) {
-      const symbol = checker.getSymbolAtLocation(node);
-      const declarations = symbol?.declarations ?? [];
-      const isLocal = declarations.some(declaration => !declaration.getSourceFile().isDeclarationFile);
-      if (!isLocal) fail(node, "BQ1102", `${node.text} requires a JavaScript host runtime`, "Use an explicit numeric host capability or a native Wasm support routine instead.");
-    }
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && !node.type) validateVariable(node.name);
+    if (ts.isParameter(node) && ts.isIdentifier(node.name) && !node.type) validateParameter(node.name);
+    if (functionHasAsyncModifier(node) && asyncLowering === "state-machine") validateAsync(node);
+    if (ts.isIdentifier(node) && impossibleRuntimeIdentifiers.has(node.text)) validateRuntimeName(node);
     ts.forEachChild(node, walk);
   };
   walk(entry.source);
@@ -447,20 +452,17 @@ for (const entry of sourceEntries) {
     if (ts.isFunctionDeclaration(statement) && statement.name && (explicitAbiNames?.has(statement.name.text) || (!explicitAbiNames && exported(statement)))) {
       registerAbi(statement.name, statement.parameters, statement.type, entry.source);
     }
-    if (ts.isVariableStatement(statement) && exported(statement)) {
+    if (!ts.isVariableStatement(statement) || !exported(statement)) continue;
       for (const declaration of statement.declarationList.declarations) {
         if (!ts.isIdentifier(declaration.name) || !declaration.initializer || !ts.isArrowFunction(declaration.initializer)) continue;
         if (explicitAbiNames && !explicitAbiNames.has(declaration.name.text)) continue;
         registerAbi(declaration.name, declaration.initializer.parameters, declaration.initializer.type, entry.source);
       }
-    }
   }
 }
-if (explicitAbiNames) {
-  const found = new Set(abiFunctions.map(item => item.name));
-  const missing = [...explicitAbiNames].filter(name => !found.has(name));
-  if (missing.length) throw new Error(`configured ABI exports were not found as exported functions: ${missing.join(", ")}`);
-}
+const foundAbiNames = new Set(abiFunctions.map(item => item.name));
+const missingAbiNames = [...(explicitAbiNames ?? [])].filter(name => !foundAbiNames.has(name));
+if (missingAbiNames.length) throw new Error(`configured ABI exports were not found as exported functions: ${missingAbiNames.join(", ")}`);
 
 const shortHash = (value: string): string => {
   let hash = 0x811c9dc5;
@@ -472,12 +474,11 @@ const renamedSymbols = new Map<ts.Symbol, string>();
 const declarationNames = (statement: ts.Statement): ts.Identifier[] => {
   const result: ts.Identifier[] = [];
   const collectBinding = (name: ts.BindingName): void => {
-    if (ts.isIdentifier(name)) result.push(name);
-    else for (const item of name.elements) if (ts.isBindingElement(item)) collectBinding(item.name);
+    if (ts.isIdentifier(name)) { result.push(name); return; }
+    for (const item of name.elements) if (ts.isBindingElement(item)) collectBinding(item.name);
   };
-  if (ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement) || ts.isInterfaceDeclaration(statement) || ts.isTypeAliasDeclaration(statement) || ts.isEnumDeclaration(statement) || ts.isModuleDeclaration(statement)) {
-    if (statement.name && ts.isIdentifier(statement.name)) result.push(statement.name);
-  } else if (ts.isVariableStatement(statement)) {
+  if ((ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement) || ts.isInterfaceDeclaration(statement) || ts.isTypeAliasDeclaration(statement) || ts.isEnumDeclaration(statement) || ts.isModuleDeclaration(statement)) && statement.name && ts.isIdentifier(statement.name)) result.push(statement.name);
+  if (ts.isVariableStatement(statement)) {
     for (const declaration of statement.declarationList.declarations) collectBinding(declaration.name);
   }
   return result;
@@ -499,15 +500,14 @@ const stripExportModifiers = (modifiers: readonly ts.ModifierLike[] | undefined,
   return kept?.length ? kept : undefined;
 };
 const assemblyType = (type: ts.TypeNode): ts.TypeNode => {
-  if (ts.isTypeReferenceNode(type) && ts.isIdentifier(type.typeName)) {
-    if (type.typeName.text === "Promise") {
-      const inner = type.typeArguments?.[0];
-      if (!inner || inner.kind === ts.SyntaxKind.VoidKeyword) return ts.factory.createTypeReferenceNode("__BqTaskVoid", undefined);
-      return ts.factory.createTypeReferenceNode("__BqTask", [assemblyType(inner)]);
-    }
-    const mapped = typeAliases.get(type.typeName.text);
-    if (mapped) return ts.factory.createTypeReferenceNode(mapped, type.typeArguments?.map(assemblyType));
+  const name = ts.isTypeReferenceNode(type) && ts.isIdentifier(type.typeName) ? type.typeName.text : undefined;
+  if (name === "Promise" && ts.isTypeReferenceNode(type)) {
+    const inner = type.typeArguments?.[0];
+    return !inner || inner.kind === ts.SyntaxKind.VoidKeyword ? ts.factory.createTypeReferenceNode("__BqTaskVoid", undefined)
+      : ts.factory.createTypeReferenceNode("__BqTask", [assemblyType(inner)]);
   }
+  const mapped = name ? typeAliases.get(name) : undefined;
+  if (mapped && ts.isTypeReferenceNode(type)) return ts.factory.createTypeReferenceNode(mapped, type.typeArguments?.map(assemblyType));
   if (type.kind === ts.SyntaxKind.NumberKeyword) return ts.factory.createTypeReferenceNode("f64", undefined);
   if (type.kind === ts.SyntaxKind.BigIntKeyword) return ts.factory.createTypeReferenceNode("i64", undefined);
   if (type.kind === ts.SyntaxKind.BooleanKeyword) return ts.factory.createTypeReferenceNode("bool", undefined);
@@ -521,17 +521,73 @@ const assemblyType = (type: ts.TypeNode): ts.TypeNode => {
  * AssemblyScript otherwise infers i32 from the same literal.
  */
 const materialiseInferredTypes = config.materialiseInferredTypes !== false;
+const unionType = (type: ts.UnionType, location: ts.Node, depth: number): ts.TypeNode | undefined => {
+  const withoutUndefined = type.types.filter(item => !(item.flags & ts.TypeFlags.Undefined));
+  const hasNullish = withoutUndefined.length !== type.types.length || type.types.some(item => Boolean(item.flags & ts.TypeFlags.Null));
+  const concrete = withoutUndefined.filter(item => !(item.flags & ts.TypeFlags.Null));
+  const single = concrete.length === 1 ? concrete[0] : undefined;
+  if (single) return nullableType(single, hasNullish, location, depth);
+  if (concrete.every(item => Boolean(item.flags & ts.TypeFlags.NumberLike))) return ts.factory.createTypeReferenceNode("f64", undefined);
+  if (concrete.every(item => Boolean(item.flags & ts.TypeFlags.BooleanLike))) return ts.factory.createTypeReferenceNode("bool", undefined);
+  if (concrete.every(item => Boolean(item.flags & ts.TypeFlags.StringLike))) return ts.factory.createKeywordTypeNode(ts.SyntaxKind.StringKeyword);
+  return undefined;
+};
+const tupleType = (type: ts.Type, location: ts.Node, depth: number): ts.TypeNode | undefined => {
+  const elements = checker.getTypeArguments(type as ts.TypeReference);
+  if (!elements.length) return ts.factory.createTypeReferenceNode("Array", [ts.factory.createTypeReferenceNode("f64", undefined)]);
+  const nodes = elements.map(item => nativeTypeNode(item, location, depth + 1));
+  if (nodes.some(item => !item)) return undefined;
+  const printed = nodes.map(item => ts.createPrinter().printNode(ts.EmitHint.Unspecified, required(item, "item"), location.getSourceFile()));
+  if (printed.every(item => item === printed[0])) return ts.factory.createTypeReferenceNode("Array", [required(nodes[0], "nodes[0]")]);
+  return undefined;
+};
+const callableType = (signature: ts.Signature, location: ts.Node, depth: number): ts.TypeNode | undefined => {
+  const parameters: ts.ParameterDeclaration[] = [];
+  for (const parameter of signature.getParameters()) {
+    const declaration = parameter.valueDeclaration ?? parameter.declarations?.[0] ?? location;
+    const parameterType = nativeTypeNode(checker.getTypeOfSymbolAtLocation(parameter, declaration), declaration, depth + 1);
+    if (!parameterType) return undefined;
+    parameters.push(ts.factory.createParameterDeclaration(undefined, undefined, parameter.getName(), undefined, parameterType, undefined));
+  }
+  const result = nativeTypeNode(signature.getReturnType(), location, depth + 1);
+  return result ? ts.factory.createFunctionTypeNode(undefined, parameters, result) : undefined;
+};
+const symbolType = (symbol: ts.Symbol, type: ts.Type, location: ts.Node, depth: number): ts.TypeNode | undefined => {
+  if (symbol.getName() === "Awaited") {
+    const arguments_ = type.aliasTypeArguments ?? (type as ts.TypeReference).typeArguments;
+    const inner = arguments_?.[0];
+    return inner ? nativeTypeNode(inner, location, depth + 1) : undefined;
+  }
+  if (symbol.getName() === "Promise") return promiseType(type, location, depth);
+  const mapped = typeAliases.get(symbol.getName());
+  if (mapped) return ts.factory.createTypeReferenceNode(mapped, undefined);
+  const replacement = abiSymbols.get(symbol) ?? renamedSymbols.get(symbol) ?? symbol.getName();
+  if (!replacement || replacement === "__type") return undefined;
+  const arguments_ = type.aliasTypeArguments ?? (type as ts.TypeReference).typeArguments;
+  const typeArguments = arguments_?.map(item => nativeTypeNode(item, location, depth + 1));
+  if (typeArguments?.some(item => !item)) return undefined;
+  return ts.factory.createTypeReferenceNode(replacement, typeArguments as ts.TypeNode[] | undefined);
+};
+const nullableType = (type: ts.Type, hasNullish: boolean, location: ts.Node, depth: number): ts.TypeNode | undefined => {
+  const inner = nativeTypeNode(type, location, depth + 1);
+  if (!inner) return undefined;
+  // AssemblyScript permits null on managed references, not numeric storage.
+  const primitive = type.flags & (ts.TypeFlags.NumberLike | ts.TypeFlags.BigIntLike | ts.TypeFlags.BooleanLike);
+  return hasNullish && !primitive ? ts.factory.createUnionTypeNode([inner, ts.factory.createLiteralTypeNode(ts.factory.createNull())]) : inner;
+};
+const promiseType = (type: ts.Type, location: ts.Node, depth: number): ts.TypeNode | undefined => {
+  const inner = (type.aliasTypeArguments ?? (type as ts.TypeReference).typeArguments)?.[0];
+  if (!inner || inner.flags & ts.TypeFlags.Void) return ts.factory.createTypeReferenceNode("__BqTaskVoid", undefined);
+  const innerNode = nativeTypeNode(inner, location, depth + 1);
+  return innerNode ? ts.factory.createTypeReferenceNode("__BqTask", [innerNode]) : undefined;
+};
 const nativeTypeNode = (type: ts.Type, location: ts.Node, depth = 0): ts.TypeNode | undefined => {
   if (depth > 16) return undefined;
   const aliasName = type.aliasSymbol?.getName();
-  if (aliasName) {
-    if (aliasName === "Awaited") {
-      const inner = type.aliasTypeArguments?.[0];
-      if (inner) return nativeTypeNode(inner, location, depth + 1);
-    }
-    const mapped = typeAliases.get(aliasName);
-    if (mapped) return ts.factory.createTypeReferenceNode(mapped, undefined);
-  }
+  const awaitedAlias = aliasName === "Awaited" ? type.aliasTypeArguments?.[0] : undefined;
+  if (awaitedAlias) return nativeTypeNode(awaitedAlias, location, depth + 1);
+  const aliasType = aliasName ? typeAliases.get(aliasName) : undefined;
+  if (aliasType) return ts.factory.createTypeReferenceNode(aliasType, undefined);
   const flags = type.flags;
   if (flags & ts.TypeFlags.Any || flags & ts.TypeFlags.Unknown) return undefined;
   if (flags & ts.TypeFlags.NumberLike) return ts.factory.createTypeReferenceNode("f64", undefined);
@@ -544,75 +600,17 @@ const nativeTypeNode = (type: ts.Type, location: ts.Node, depth = 0): ts.TypeNod
     const symbol = type.getSymbol();
     return symbol ? ts.factory.createTypeReferenceNode(symbol.getName(), undefined) : undefined;
   }
-  if (type.isUnion()) {
-    const withoutUndefined = type.types.filter(item => !(item.flags & ts.TypeFlags.Undefined));
-    const hasNullish = withoutUndefined.length !== type.types.length || type.types.some(item => Boolean(item.flags & ts.TypeFlags.Null));
-    const concrete = withoutUndefined.filter(item => !(item.flags & ts.TypeFlags.Null));
-    if (concrete.length === 1) {
-      const inner = nativeTypeNode(required(concrete[0], "concrete[0]"), location, depth + 1);
-      if (!inner) return undefined;
-      // AssemblyScript models nullable managed references with `T | null`.
-      if (hasNullish && !(required(concrete[0], "concrete[0]").flags & (ts.TypeFlags.NumberLike | ts.TypeFlags.BigIntLike | ts.TypeFlags.BooleanLike))) {
-        return ts.factory.createUnionTypeNode([inner, ts.factory.createLiteralTypeNode(ts.factory.createNull())]);
-      }
-      return inner;
-    }
-    if (concrete.every(item => Boolean(item.flags & ts.TypeFlags.NumberLike))) return ts.factory.createTypeReferenceNode("f64", undefined);
-    if (concrete.every(item => Boolean(item.flags & ts.TypeFlags.BooleanLike))) return ts.factory.createTypeReferenceNode("bool", undefined);
-    if (concrete.every(item => Boolean(item.flags & ts.TypeFlags.StringLike))) return ts.factory.createKeywordTypeNode(ts.SyntaxKind.StringKeyword);
-    return undefined;
-  }
-  if (checker.isTupleType(type)) {
-    const elements = checker.getTypeArguments(type as ts.TypeReference);
-    if (!elements.length) return ts.factory.createTypeReferenceNode("Array", [ts.factory.createTypeReferenceNode("f64", undefined)]);
-    const nodes = elements.map(item => nativeTypeNode(item, location, depth + 1));
-    if (nodes.some(item => !item)) return undefined;
-    const printed = nodes.map(item => ts.createPrinter().printNode(ts.EmitHint.Unspecified, required(item, "item"), location.getSourceFile()));
-    if (printed.every(item => item === printed[0])) return ts.factory.createTypeReferenceNode("Array", [required(nodes[0], "nodes[0]")]);
-    return undefined;
-  }
+  if (type.isUnion()) return unionType(type, location, depth);
+  if (checker.isTupleType(type)) return tupleType(type, location, depth);
   if (checker.isArrayType(type)) {
     const element = checker.getTypeArguments(type as ts.TypeReference)[0];
     const elementNode = element ? nativeTypeNode(element, location, depth + 1) : undefined;
     return elementNode ? ts.factory.createTypeReferenceNode("Array", [elementNode]) : undefined;
   }
   const signatures = checker.getSignaturesOfType(type, ts.SignatureKind.Call);
-  if (signatures.length === 1) {
-    const signature = required(signatures[0], "signatures[0]");
-    const parameters: ts.ParameterDeclaration[] = [];
-    for (const parameter of signature.getParameters()) {
-      const declaration = parameter.valueDeclaration ?? parameter.declarations?.[0] ?? location;
-      const parameterType = nativeTypeNode(checker.getTypeOfSymbolAtLocation(parameter, declaration), declaration, depth + 1);
-      if (!parameterType) return undefined;
-      parameters.push(ts.factory.createParameterDeclaration(undefined, undefined, parameter.getName(), undefined, parameterType, undefined));
-    }
-    const result = nativeTypeNode(signature.getReturnType(), location, depth + 1);
-    return result ? ts.factory.createFunctionTypeNode(undefined, parameters, result) : undefined;
-  }
+  if (signatures.length === 1) return callableType(required(signatures[0], "signatures[0]"), location, depth);
   const symbol = type.aliasSymbol ?? type.getSymbol();
-  if (symbol) {
-    if (symbol.getName() === "Awaited") {
-      const arguments_ = type.aliasTypeArguments ?? (type as ts.TypeReference).typeArguments;
-      const inner = arguments_?.[0];
-      return inner ? nativeTypeNode(inner, location, depth + 1) : undefined;
-    }
-    if (symbol.getName() === "Promise") {
-      const arguments_ = type.aliasTypeArguments ?? (type as ts.TypeReference).typeArguments;
-      const inner = arguments_?.[0];
-      if (!inner || inner.flags & ts.TypeFlags.Void) return ts.factory.createTypeReferenceNode("__BqTaskVoid", undefined);
-      const innerNode = nativeTypeNode(inner, location, depth + 1);
-      return innerNode ? ts.factory.createTypeReferenceNode("__BqTask", [innerNode]) : undefined;
-    }
-    const mapped = typeAliases.get(symbol.getName());
-    if (mapped) return ts.factory.createTypeReferenceNode(mapped, undefined);
-    const replacement = abiSymbols.get(symbol) ?? renamedSymbols.get(symbol) ?? symbol.getName();
-    if (replacement && replacement !== "__type") {
-      const arguments_ = type.aliasTypeArguments ?? (type as ts.TypeReference).typeArguments;
-      const typeArguments = arguments_?.map(item => nativeTypeNode(item, location, depth + 1));
-      if (typeArguments?.some(item => !item)) return undefined;
-      return ts.factory.createTypeReferenceNode(replacement, typeArguments as ts.TypeNode[] | undefined);
-    }
-  }
+  if (symbol) return symbolType(symbol, type, location, depth);
   return undefined;
 };
 const declaredTypeOfSymbol = (symbol: ts.Symbol | undefined, seen = new Set<ts.Symbol>()): ts.TypeNode | undefined => {
@@ -625,10 +623,9 @@ const declaredTypeOfSymbol = (symbol: ts.Symbol | undefined, seen = new Set<ts.S
     if ((ts.isVariableDeclaration(declaration) || ts.isParameter(declaration) || ts.isPropertyDeclaration(declaration) || ts.isPropertySignature(declaration)) && declaration.type) {
       return assemblyType(declaration.type);
     }
-    if ((ts.isVariableDeclaration(declaration) || ts.isPropertyDeclaration(declaration)) && declaration.initializer) {
-      const inferred = syntacticTypeOfExpression(declaration.initializer, nextSeen);
-      if (inferred) return inferred;
-    }
+    const inferred = (ts.isVariableDeclaration(declaration) || ts.isPropertyDeclaration(declaration)) && declaration.initializer
+      ? syntacticTypeOfExpression(declaration.initializer, nextSeen) : undefined;
+    if (inferred) return inferred;
     if ((ts.isFunctionDeclaration(declaration) || ts.isMethodDeclaration(declaration) || ts.isMethodSignature(declaration) || ts.isGetAccessorDeclaration(declaration)) && declaration.type) {
       return assemblyType(declaration.type);
     }
@@ -652,60 +649,59 @@ const numericConstantExpression = (node: ts.Expression): boolean => {
   }
   return false;
 };
+const callExpressionType = (expression: ts.CallExpression | ts.NewExpression): ts.TypeNode | undefined => {
+  const signature = checker.getResolvedSignature(expression);
+  const declarationType = (signature?.declaration as { type?: ts.TypeNode } | undefined)?.type;
+  if (declarationType && ts.isTypeNode(declarationType) && ts.isTypeReferenceNode(declarationType) && ts.isIdentifier(declarationType.typeName) && typeAliases.has(declarationType.typeName.text)) {
+    return assemblyType(declarationType);
+  }
+  const instantiated = signature ? nativeTypeNode(signature.getReturnType(), expression) : undefined;
+  if (instantiated) return instantiated;
+  if (declarationType && ts.isTypeNode(declarationType)) return assemblyType(declarationType);
+  return undefined;
+};
+const conditionalExpressionType = (expression: ts.ConditionalExpression, seen: Set<ts.Symbol>): ts.TypeNode | undefined => {
+  const left = syntacticTypeOfExpression(expression.whenTrue, seen);
+  const right = syntacticTypeOfExpression(expression.whenFalse, seen);
+  const printer = ts.createPrinter();
+  const source = expression.getSourceFile();
+  if (left && right && printer.printNode(ts.EmitHint.Unspecified, left, source) === printer.printNode(ts.EmitHint.Unspecified, right, source)) return left;
+  if (left && numericConstantExpression(expression.whenFalse)) return left;
+  if (right && numericConstantExpression(expression.whenTrue)) return right;
+  const conditionOperand = numericConstantExpression(expression.whenTrue) && numericConstantExpression(expression.whenFalse) && ts.isBinaryExpression(expression.condition)
+    ? syntacticTypeOfExpression(expression.condition.left, seen) ?? syntacticTypeOfExpression(expression.condition.right, seen) : undefined;
+  if (conditionOperand) return conditionOperand;
+  if ((expression.whenTrue.kind === ts.SyntaxKind.TrueKeyword || expression.whenTrue.kind === ts.SyntaxKind.FalseKeyword) &&
+      (expression.whenFalse.kind === ts.SyntaxKind.TrueKeyword || expression.whenFalse.kind === ts.SyntaxKind.FalseKeyword)) {
+    return ts.factory.createTypeReferenceNode("bool", undefined);
+  }
+  return undefined;
+};
+const binaryExpressionType = (expression: ts.BinaryExpression, seen: Set<ts.Symbol>): ts.TypeNode | undefined => {
+  const operator = expression.operatorToken.kind;
+  const comparisonOperators = new Set<ts.SyntaxKind>([
+    ts.SyntaxKind.EqualsEqualsToken, ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsToken,
+    ts.SyntaxKind.ExclamationEqualsEqualsToken, ts.SyntaxKind.LessThanToken, ts.SyntaxKind.LessThanEqualsToken,
+    ts.SyntaxKind.GreaterThanToken, ts.SyntaxKind.GreaterThanEqualsToken, ts.SyntaxKind.InKeyword,
+    ts.SyntaxKind.InstanceOfKeyword,
+  ]);
+  if (comparisonOperators.has(operator)) return ts.factory.createTypeReferenceNode("bool", undefined);
+  return syntacticTypeOfExpression(expression.left, seen) ?? syntacticTypeOfExpression(expression.right, seen);
+};
 const syntacticTypeOfExpression = (expression: ts.Expression | undefined, seen = new Set<ts.Symbol>()): ts.TypeNode | undefined => {
   if (!expression) return undefined;
-  if (ts.isParenthesizedExpression(expression) || ts.isNonNullExpression(expression) || ts.isAsExpression(expression) || ts.isTypeAssertionExpression(expression)) {
-    if (ts.isAsExpression(expression) || ts.isTypeAssertionExpression(expression)) return assemblyType(expression.type);
-    return syntacticTypeOfExpression(expression.expression, seen);
-  }
+  if (ts.isAsExpression(expression) || ts.isTypeAssertionExpression(expression)) return assemblyType(expression.type);
+  if (ts.isParenthesizedExpression(expression) || ts.isNonNullExpression(expression)) return syntacticTypeOfExpression(expression.expression, seen);
   if (ts.isIdentifier(expression)) return declaredTypeOfSymbol(checker.getSymbolAtLocation(expression), seen);
   if (ts.isPropertyAccessExpression(expression)) return declaredTypeOfSymbol(checker.getSymbolAtLocation(expression.name), seen);
-  if (ts.isCallExpression(expression) || ts.isNewExpression(expression)) {
-    const signature = checker.getResolvedSignature(expression);
-    const declarationType = (signature?.declaration as { type?: ts.TypeNode } | undefined)?.type;
-    if (declarationType && ts.isTypeNode(declarationType) && ts.isTypeReferenceNode(declarationType) && ts.isIdentifier(declarationType.typeName) && typeAliases.has(declarationType.typeName.text)) {
-      return assemblyType(declarationType);
-    }
-    if (signature) {
-      const instantiated = nativeTypeNode(signature.getReturnType(), expression);
-      if (instantiated) return instantiated;
-    }
-    if (declarationType && ts.isTypeNode(declarationType)) return assemblyType(declarationType);
-  }
-  if (ts.isConditionalExpression(expression)) {
-    const left = syntacticTypeOfExpression(expression.whenTrue, seen);
-    const right = syntacticTypeOfExpression(expression.whenFalse, seen);
-    const printer = ts.createPrinter();
-    const source = expression.getSourceFile();
-    if (left && right && printer.printNode(ts.EmitHint.Unspecified, left, source) === printer.printNode(ts.EmitHint.Unspecified, right, source)) return left;
-    if (left && numericConstantExpression(expression.whenFalse)) return left;
-    if (right && numericConstantExpression(expression.whenTrue)) return right;
-    if (numericConstantExpression(expression.whenTrue) && numericConstantExpression(expression.whenFalse)) {
-      if (ts.isBinaryExpression(expression.condition)) {
-        const conditionOperand = syntacticTypeOfExpression(expression.condition.left, seen) ?? syntacticTypeOfExpression(expression.condition.right, seen);
-        if (conditionOperand) return conditionOperand;
-      }
-    }
-    if ((expression.whenTrue.kind === ts.SyntaxKind.TrueKeyword || expression.whenTrue.kind === ts.SyntaxKind.FalseKeyword) &&
-        (expression.whenFalse.kind === ts.SyntaxKind.TrueKeyword || expression.whenFalse.kind === ts.SyntaxKind.FalseKeyword)) {
-      return ts.factory.createTypeReferenceNode("bool", undefined);
-    }
-  }
-  if (ts.isBinaryExpression(expression)) {
-    const operator = expression.operatorToken.kind;
-    const comparisonOperators = new Set<ts.SyntaxKind>([
-      ts.SyntaxKind.EqualsEqualsToken, ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsToken,
-      ts.SyntaxKind.ExclamationEqualsEqualsToken, ts.SyntaxKind.LessThanToken, ts.SyntaxKind.LessThanEqualsToken,
-      ts.SyntaxKind.GreaterThanToken, ts.SyntaxKind.GreaterThanEqualsToken, ts.SyntaxKind.InKeyword,
-      ts.SyntaxKind.InstanceOfKeyword,
-    ]);
-    if (comparisonOperators.has(operator)) return ts.factory.createTypeReferenceNode("bool", undefined);
-    return syntacticTypeOfExpression(expression.left, seen) ?? syntacticTypeOfExpression(expression.right, seen);
-  }
+  if (ts.isCallExpression(expression) || ts.isNewExpression(expression)) return callExpressionType(expression);
+  if (ts.isConditionalExpression(expression)) return conditionalExpressionType(expression, seen);
+  if (ts.isBinaryExpression(expression)) return binaryExpressionType(expression, seen);
   if (ts.isPrefixUnaryExpression(expression) || ts.isPostfixUnaryExpression(expression)) return syntacticTypeOfExpression(expression.operand, seen);
   return undefined;
 };
 const returnedFromTypedFunction = (node: ts.Node): ts.TypeNode | undefined => {
+  // A directly returned local inherits its enclosing explicit return representation, including async task results.
   if (!ts.isIdentifier(node)) return undefined;
   const symbol = symbolOf(node);
   if (!symbol) return undefined;
@@ -720,7 +716,7 @@ const returnedFromTypedFunction = (node: ts.Node): ts.TypeNode | undefined => {
     if (ts.isReturnStatement(candidate) && candidate.expression) {
       let expression: ts.Expression = candidate.expression;
       while (ts.isParenthesizedExpression(expression) || ts.isNonNullExpression(expression) || ts.isAsExpression(expression) || ts.isTypeAssertionExpression(expression)) expression = expression.expression;
-      if (ts.isIdentifier(expression) && symbolOf(expression) === symbol) returned = true;
+      returned = ts.isIdentifier(expression) && symbolOf(expression) === symbol;
     }
     ts.forEachChild(candidate, walk);
   };
@@ -738,10 +734,8 @@ const inferredTypeFor = (node: ts.Node, initializer?: ts.Expression): ts.TypeNod
 };
 const inferredReturnTypeFor = (node: ts.SignatureDeclaration): ts.TypeNode | undefined => {
   if (!materialiseInferredTypes) return undefined;
-  if ((ts.isArrowFunction(node) || ts.isFunctionExpression(node)) && !ts.isBlock(node.body)) {
-    const fromBody = syntacticTypeOfExpression(node.body);
-    if (fromBody) return fromBody;
-  }
+  const fromBody = (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) && !ts.isBlock(node.body) ? syntacticTypeOfExpression(node.body) : undefined;
+  if (fromBody) return fromBody;
   const signature = checker.getSignatureFromDeclaration(node);
   const declarationType = (signature?.declaration as { type?: ts.TypeNode } | undefined)?.type;
   return declarationType ? assemblyType(declarationType) : signature ? nativeTypeNode(signature.getReturnType(), node) : undefined;
