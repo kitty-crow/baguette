@@ -61,6 +61,7 @@ const configRoot = pathHost.dirname(configPath);
 
 /** Retry only timed-out backend jobs; a normal nonzero exit indicates a compiler fault, not a transient timeout. */
 const run = async (command: string[], label: string, attempts = 1, timeoutMs = 240_000): Promise<BunResult> => {
+  // A timeout can leave a backend in a partial state; retries must spawn a fresh process. A normal compiler rejection is final.
   if (!command[0]) throw new Error(`${label} has no executable`);
   let lastExit = -1;
   let lastTimedOut = false;
