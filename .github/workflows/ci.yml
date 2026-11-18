@@ -41,9 +41,20 @@ jobs:
             # Test this compiler revision, not just the previously committed WAT.
             git -C ../teto-check/baguette fetch --depth 1 "$GITHUB_WORKSPACE" "$GITHUB_SHA"
             git -C ../teto-check/baguette checkout --detach FETCH_HEAD
-            git -C ../teto-check add baguette
-            git -C ../teto-check submodule update --init --recursive
             cd ../teto-check
+            # The temporary consumer's manifest must match its candidate gitlink.
+            python3 - "$GITHUB_SHA" <<'PY'
+          import json, sys
+          from pathlib import Path
+          path = Path("project.dependencies.json")
+          data = json.loads(path.read_text())
+          item = next(item for item in data["dependencies"] if item["path"] == "baguette")
+          item["commit"] = sys.argv[1]
+          path.write_text(json.dumps(data, indent=2) + "\n")
+          PY
+            git add baguette project.dependencies.json
+            git submodule sync --recursive
+            git submodule update --init --recursive
             npm install --package-lock=false
             bash scripts/regenerate.sh
           else
