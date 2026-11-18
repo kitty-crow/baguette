@@ -14,7 +14,7 @@
       "name": "Bake",
       "repository": "kittycrow-kittyx/bake",
       "path": "vendor/bake",
-      "commit": "338e15dc6e024bbe7604593888d935a3ce9f957b",
+      "commit": "cae1e7b9547c8d865fd117ec629bfdc8dfdcca62",
       "relationship": "build",
       "direct": true,
       "updatePolicy": "pull-request"
