@@ -1709,10 +1709,11 @@ const loweredSourceHashes = Object.fromEntries(await Promise.all(variants.map(as
 const allowedHostImports = config.allowedHostImports ?? [{ module: "env", name: "memory", kind: "memory" as const }];
 const importKey = (item: { module: string; name: string; kind: WebAssembly.ImportExportKind }): string => `${item.module}\u0000${item.name}\u0000${item.kind}`;
 const allowedImportKeys = new Set(allowedHostImports.map(importKey));
-const instantiateImports = (threaded: boolean): WebAssembly.Imports => {
-  const imports: Record<string, Record<string, WebAssembly.ImportValue>> = {};
+type NativeImport = WebAssembly.Memory | WebAssembly.Global | WebAssembly.Table | (() => number);
+const instantiateImports = (threaded: boolean): Record<string, Record<string, NativeImport>> => {
+  const imports: Record<string, Record<string, NativeImport>> = {};
   for (const item of allowedHostImports) {
-    const namespace: Record<string, WebAssembly.ImportValue> = imports[item.module] ?? {};
+    const namespace: Record<string, NativeImport> = imports[item.module] ?? {};
     imports[item.module] = namespace;
     if (item.kind === "memory") {
       namespace[item.name] = new WebAssembly.Memory({
@@ -1721,7 +1722,7 @@ const instantiateImports = (threaded: boolean): WebAssembly.Imports => {
         shared: threaded,
       });
     }
-    if (item.kind === "function") namespace[item.name] = (item.name === "abort" ? (() => { throw new Error("WebAssembly abort import invoked during Baguette verification"); }) : (() => 0)) as WebAssembly.ImportValue;
+    if (item.kind === "function") namespace[item.name] = item.name === "abort" ? (() => { throw new Error("WebAssembly abort import invoked during Baguette verification"); }) : (() => 0);
     if (item.kind === "global") namespace[item.name] = new WebAssembly.Global({ value: "i32", mutable: false }, 0);
     if (item.kind === "table") namespace[item.name] = new WebAssembly.Table({ element: "anyfunc", initial: 1 });
   }
