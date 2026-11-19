@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "name": "Baguette fixture",
+  "project": "../../../tsconfig.json",
+  "entries": [
+    "main.ts"
+  ],
+  "generatedDir": "../../../build/ci-generated",
+  "outDir": "../../../build/ci-wasm",
+  "moduleBaseName": "fixture",
+  "abi": {
+    "exports": [
+      "add"
+    ],
+    "tests": [
+      {
+        "function": "add",
+        "args": [
+          20,
+          22
+        ],
+        "expected": 42
+      }
+    ]
+  },
+  "memory": {
+    "initialPages": 1024,
+    "maximumPages": 2048,
+    "import": true,
+    "export": false
+  },
+  "runtime": "stub",
+  "variants": [
+    {
+      "name": "fixture",
+      "threaded": false
+    },
+    {
+      "name": "fixture-threads",
+      "threaded": true
+    }
+  ],
+  "allowedHostImports": [
+    {
+      "module": "env",
+      "name": "memory",
+      "kind": "memory"
+    }
+  ],
+  "materialiseInferredTypes": true
+}

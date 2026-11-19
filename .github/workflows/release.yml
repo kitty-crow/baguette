@@ -1,0 +1,129 @@
+name: Release
+
+on:
+  workflow_run:
+    workflows: [Transpiler validation]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: source-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish source release
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+      VALIDATION_RUN_ID: ${{ github.event.workflow_run.id || '' }}
+      # One-time correction of the existing v1.0.1 release; no other tag may be rewritten.
+      CORRECTION_TAG: v1.0.1
+      CORRECTION_RELEASE_ID: '451324681'
+      CORRECTION_OLD_TAG_OBJECT: e6b7c4f03a0a52b09a4558bc42d9ffdd8589b50d
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 0
+          submodules: recursive
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Validate source
+        id: version
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$SOURCE_SHA"
+          if [[ -n "$VALIDATION_RUN_ID" ]]; then
+            gh api "repos/$GH_REPO/actions/runs/$VALIDATION_RUN_ID" | jq -e --arg sha "$SOURCE_SHA" '.name == "Transpiler validation" and .head_sha == $sha and .head_branch == "main" and .event == "push" and .status == "completed" and .conclusion == "success"'
+          else
+            gh api "repos/$GH_REPO/actions/workflows/ci.yml/runs?head_sha=$SOURCE_SHA&branch=main&event=push&per_page=100" | jq -e --arg sha "$SOURCE_SHA" 'any(.workflow_runs[]; .name == "Transpiler validation" and .head_sha == $sha and .head_branch == "main" and .event == "push" and .status == "completed" and .conclusion == "success")'
+          fi
+          version="$(jq -r .version package.json)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          tag="v$version"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [[ "$tag" == "$CORRECTION_TAG" ]]; then
+            gh api "repos/$GH_REPO/releases/tags/$tag" | jq -e --argjson id "$CORRECTION_RELEASE_ID" '.id == $id and .immutable != true'
+            object="$(git ls-remote --refs origin "refs/tags/$tag" | cut -f1)"
+            ref="$(git ls-remote origin "refs/tags/$tag^{}" | cut -f1)"
+            if [[ -z "$ref" ]]; then ref="$object"; fi
+            if [[ "$object" != "$CORRECTION_OLD_TAG_OBJECT" && "$ref" != "$SOURCE_SHA" ]]; then
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "publish=true" >> "$GITHUB_OUTPUT"
+              echo "replace=true" >> "$GITHUB_OUTPUT"
+            fi
+          elif gh release view "$tag" --repo "$GH_REPO" >/dev/null 2>&1; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install dependencies
+        if: steps.version.outputs.publish == 'true'
+        run: |
+          if [[ -f bun.lock ]]; then bun install --frozen-lockfile --ignore-scripts; else bun install --ignore-scripts; fi
+      - name: Package distribution
+        if: steps.version.outputs.publish == 'true'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: bash scripts/package-release.sh "$TAG"
+      - name: Generate checksums
+        if: steps.version.outputs.publish == 'true'
+        run: cd dist && sha256sum *.tar.gz > SHA256SUMS && sha256sum -c SHA256SUMS
+      - name: Publish release
+        if: steps.version.outputs.publish == 'true'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          REPLACE_EXISTING: ${{ steps.version.outputs.replace }}
+        run: |
+          set -euo pipefail
+          test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$SOURCE_SHA"
+          if [[ "$REPLACE_EXISTING" == true ]]; then
+            gh api "repos/$GH_REPO/releases/tags/$TAG" | jq -e --argjson id "$CORRECTION_RELEASE_ID" '.id == $id and .immutable != true'
+            archive="dist/${GH_REPO##*/}-$TAG.tar.gz"
+            listing="$(mktemp)"
+            tar -tzf "$archive" > "$listing"
+            if grep -Eq '^(\./)?thistle(/|$)' "$listing"; then
+              echo "Unexpected root Thistle content in transpiler release" >&2
+              exit 1
+            fi
+            rm -f "$listing"
+            [[ "$(tar -xOf "$archive" ./RELEASE_COMMIT)" == "$SOURCE_SHA" ]]
+            object="$(git ls-remote --refs origin "refs/tags/$TAG" | cut -f1)"
+            ref="$(git ls-remote origin "refs/tags/$TAG^{}" | cut -f1)"
+            if [[ -z "$ref" ]]; then ref="$object"; fi
+            if [[ "$ref" != "$SOURCE_SHA" ]]; then
+              [[ "$object" == "$CORRECTION_OLD_TAG_OBJECT" ]]
+              git -c user.name=github-actions -c user.email=41898282+github-actions[bot]@users.noreply.github.com tag -fa "$TAG" "$SOURCE_SHA" -m "$TAG"
+              git push --force-with-lease="refs/tags/$TAG:$object" origin "refs/tags/$TAG"
+            fi
+            gh release upload "$TAG" "$archive" dist/SHA256SUMS --clobber --repo "$GH_REPO"
+            download="$(mktemp -d)"
+            gh release download "$TAG" --repo "$GH_REPO" --pattern "${archive##*/}" --pattern SHA256SUMS --dir "$download"
+            (cd "$download" && sha256sum -c SHA256SUMS)
+            cmp "$archive" "$download/${archive##*/}"
+            cmp dist/SHA256SUMS "$download/SHA256SUMS"
+            rm -rf "$download"
+            test "$(git ls-remote origin "refs/tags/$TAG^{}" | cut -f1)" = "$SOURCE_SHA"
+            exit 0
+          fi
+          ref="$(git ls-remote origin "refs/tags/$TAG^{}" | cut -f1)"
+          if [[ -z "$ref" ]]; then ref="$(git ls-remote origin "refs/tags/$TAG" | cut -f1)"; fi
+          if [[ -z "$ref" ]]; then
+            git -c user.name=github-actions -c user.email=41898282+github-actions[bot]@users.noreply.github.com tag -a "$TAG" "$SOURCE_SHA" -m "$TAG"
+            git push origin "refs/tags/$TAG"
+          else
+            test "$ref" = "$SOURCE_SHA"
+          fi
+          gh release create "$TAG" dist/*.tar.gz dist/SHA256SUMS --verify-tag --title "${GH_REPO##*/} $TAG" --generate-notes

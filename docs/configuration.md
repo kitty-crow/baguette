@@ -12,6 +12,7 @@ Important fields include:
 - `moduleBaseName`: the default module name;
 - `typeAliases` and `abiTypes`: source and host ABI mappings;
 - `abi.exports`: exported functions to retain;
+- `abi.exportNames`: optional mapping from selected source function names to public WebAssembly identifiers, preserving an ABI when canonical TypeScript names change;
 - `memory`: initial, maximum, imported and exported memory settings;
 - `variants`: output names, threading mode and optional preludes;
 - `allowedHostImports`: the imports permitted in the final module;

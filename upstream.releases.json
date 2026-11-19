@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "dependencies": [
+    {
+      "repository": "kittycrow-kittyx/bake",
+      "path": "bake",
+      "commit": "30f7c767584737bf001d2f99b7d303b809bb4f0f",
+      "tag": "v1.0.1"
+    }
+  ]
+}

@@ -2,11 +2,11 @@
   "schema": 1,
   "dependencies": [
     {
-      "name": "KITTYX",
-      "repository": "kitty-crow/kittyx",
-      "path": "vendor/kittyx",
-      "commit": "6d6dbac796d59e8ea07c52cbcd3a0b7f181da163",
-      "relationship": "contract",
+      "name": "Bake",
+      "repository": "kittycrow-kittyx/bake",
+      "path": "bake",
+      "commit": "30f7c767584737bf001d2f99b7d303b809bb4f0f",
+      "relationship": "build",
       "direct": true,
       "updatePolicy": "pull-request"
     }
