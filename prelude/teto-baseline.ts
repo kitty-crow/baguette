@@ -46,10 +46,10 @@
 @inline function wordToI32(value: i64): i32 { return <i32>value; }
 @inline function wordToU32(value: i64): u32 { return <u32>value; }
 @inline function wordToPtr(value: u64): u32 { return value > 0x7fffffff ? 0xffffffff : <u32>value; }
-@inline function bitsToF32(value: u64): f32 { return reinterpret<f32>(<i32>value); }
-@inline function bitsToF64(value: u64): f64 { return reinterpret<f64>(<i64>value); }
-@inline function f32ToBits(value: f64): u64 { return <u32>reinterpret<i32>(<f32>value); }
-@inline function f64ToBits(value: f64): u64 { return <u64>reinterpret<i64>(value); }
+@inline function bitsToF32(memoryHandle: usize, scratch: u32, value: u64): f32 { store<u32>(scratch, <u32>value); return load<f32>(scratch); }
+@inline function bitsToF64(memoryHandle: usize, scratch: u32, value: u64): f64 { store<u64>(scratch, value); return load<f64>(scratch); }
+@inline function f32ToBits(memoryHandle: usize, scratch: u32, value: f64): u64 { store<f32>(scratch, <f32>value); return <u64>load<u32>(scratch); }
+@inline function f64ToBits(memoryHandle: usize, scratch: u32, value: f64): u64 { store<f64>(scratch, value); return load<u64>(scratch); }
 @inline function roundF32(value: f64): f32 { return <f32>value; }
 @inline function floatIsNaN(value: f64): bool { return value != value; }
 @inline function floatSqrt(value: f64): f64 { return Math.sqrt(value); }

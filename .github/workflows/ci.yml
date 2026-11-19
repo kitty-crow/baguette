@@ -1,49 +1,117 @@
-name: CI
+name: Transpiler validation
 
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   test:
+    name: Validate transpiler
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out source
+        uses: actions/checkout@v5
         with:
           submodules: recursive
 
-      - uses: oven-sh/setup-bun@v2
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
 
-      - uses: actions/setup-node@v4
+      - name: Install dependencies
+        run: bun install
+
+      - name: Strict Code Guards
+        run: bun run guards
+
+      - name: Type-check transpiler
+        run: bun run check
+
+      - name: Test source contracts
+        run: bun run test:source-contract
+
+      - name: Test modular WAT emission
+        run: bun run test:wat-modules
+
+  transpile:
+    name: Transpile source
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
         with:
-          node-version: 22
+          submodules: recursive
 
-      - name: Install
-        run: npm install --package-lock=false
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
 
-      - name: Check Baguette and Bake
-        run: npm run check
-
-      - name: Verify Teto compatibility
+      - name: Install dependencies
         run: |
-          git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/kitty-crow/teto.git ../teto-check
-          rm -rf ../teto-check/baguette
-          mkdir -p ../teto-check/baguette
-          rsync -a --exclude .git --exclude node_modules ./ ../teto-check/baguette/
-          cd ../teto-check
-          npm install
-          npm run teto:build
+          bun install
+          bun install --cwd vendor/bake --frozen-lockfile
 
-      - name: Verify Sandsara compatibility
+      - name: Transpile fixture source
+        run: bun src/compiler.ts --config src/test/fixtures/baguette.json --emit-modular-wat
+
+      - name: Upload generated source
+        uses: actions/upload-artifact@v6
+        with:
+          name: generated-source
+          path: |
+            build/ci-generated/
+            build/ci-wasm/
+          if-no-files-found: error
+
+  validate-generated:
+    name: Validate generated source
+    needs: transpile
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Download generated source
+        uses: actions/download-artifact@v7
+        with:
+          name: generated-source
+          path: build
+
+      - name: Reconstruct modular WAT
         run: |
-          git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/kitty-crow/sandsara-track-viewer.git ../sandsara-check
-          rm -rf ../sandsara-check/baguette
-          mkdir -p ../sandsara-check/baguette
-          rsync -a --exclude .git --exclude node_modules ./ ../sandsara-check/baguette/
-          cd ../sandsara-check
-          npm install
-          npm run build:router-wasm
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path("build/ci-generated")
+          for name in ("fixture", "fixture-threads"):
+              directory = root / name
+              layout = json.loads((directory / "layout.json").read_text())
+              assert layout["encoding"] == "utf-16-code-units"
+              parts = [(layout["prefix"]).encode("utf-16-le")]
+              for file, offset, length in layout["order"]:
+                  data = (directory / file).read_text().encode("utf-16-le")
+                  parts.append(data[offset * 2:(offset + length) * 2])
+              parts.append(layout["suffix"].encode("utf-16-le"))
+              wat = b"".join(parts).decode("utf-16-le")
+              assert wat == (root / (name + ".wat")).read_text()
+              (root / (name + ".linked.wat")).write_text(wat)
+          PY
+
+      - name: Validate generated source
+        run: |
+          for variant in fixture fixture-threads; do
+            bun node_modules/.bin/wasm-opt "build/ci-generated/$variant.linked.wat" -O3 --all-features --strip-debug -o "build/ci-wasm/$variant.linked.wasm"
+          done
+
+      - name: Test generated WebAssembly
+        run: bun src/test/fixtures/verify.ts

@@ -1,63 +1,21 @@
+import { parseConfig, type BaguetteConfig, type JsonObject } from "./contracts.ts";
+import processHost from "node:process";
+import * as fs from "node:fs/promises";
+import { mkdirSync } from "node:fs";
+import * as pathHost from "node:path";
+import * as urlHost from "node:url";
+import * as childProcess from "node:child_process";
+import { pathExists } from "./host.ts";
 import ts from "typescript";
+import { assertCanonicalThistleSource } from "./source-contract.ts";
 
-interface HostProcess {
-  argv: string[];
-  cwd(): string;
-  env: Record<string, string | undefined>;
-  execPath: string;
-}
-interface HostFs {
-  access(path: string): Promise<void>;
-  mkdir(path: string, options: { recursive: boolean }): Promise<void>;
-  readFile(path: string, encoding: "utf8"): Promise<string>;
-  rm(path: string, options: { recursive: boolean; force: boolean }): Promise<void>;
-  writeFile(path: string, data: string): Promise<void>;
-}
-interface HostPath {
-  dirname(path: string): string;
-  isAbsolute(path: string): boolean;
-  join(...parts: string[]): string;
-  normalize(path: string): string;
-  relative(from: string, to: string): string;
-  resolve(...parts: string[]): string;
-  sep: string;
-}
-interface HostUrl { fileURLToPath(url: string): string; }
-interface HostChild {
-  once(event: "exit", listener: (code: number | null) => void): void;
-  once(event: "error", listener: (error: Error) => void): void;
-}
-interface HostChildProcess {
-  spawn(executable: string, args: string[], options: {
-    cwd: string;
-    env: Record<string, string | undefined>;
-    stdio: "inherit";
-  }): HostChild;
-}
-interface BaguetteVariant { name: string; threaded?: boolean; preludeFile?: string; }
-interface BaguetteConfig {
-  project?: string;
-  entries: string[];
-  generatedDir?: string;
-  outDir?: string;
-  preludeFile?: string;
-  intrinsicModules?: string[];
-  variants?: BaguetteVariant[];
-  [key: string]: unknown;
-}
-
-const processHost = (globalThis as unknown as { process: HostProcess }).process;
-const fs = await import("node:fs/promises" as string) as unknown as HostFs;
-const pathHost = await import("node:path" as string) as unknown as HostPath;
-const urlHost = await import("node:url" as string) as unknown as HostUrl;
-const childProcess = await import("node:child_process" as string) as unknown as HostChildProcess;
 const root = processHost.cwd();
 
-function optionValue(name: string): string | undefined {
-  const direct = processHost.argv.find(value => value.startsWith(`${name}=`));
+function optionValue(name: string): string | null {
+  const direct = processHost.argv.find(value => value.startsWith(`${name}=`)) ?? null;
   if (direct) return direct.slice(name.length + 1);
   const index = processHost.argv.indexOf(name);
-  return index >= 0 ? processHost.argv[index + 1] : undefined;
+  return index >= 0 ? processHost.argv[index + 1] ?? null : null;
 }
 
 function setConfigArg(value: string): void {
@@ -74,26 +32,14 @@ function setConfigArg(value: string): void {
   processHost.argv.push("--config", value);
 }
 
-async function exists(path: string): Promise<boolean> {
-  try {
-    await fs.access(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
-async function readJson<T>(path: string): Promise<T> {
-  return JSON.parse(await fs.readFile(path, "utf8")) as T;
-}
-
-async function writeJson(path: string, value: unknown): Promise<void> {
-  await fs.mkdir(pathHost.dirname(path), { recursive: true });
+async function writeJson(path: string, value: JsonObject | BaguetteConfig): Promise<void> {
+  mkdirSync(pathHost.dirname(path), { recursive: true });
   await fs.writeFile(path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 async function run(command: string[], cwd: string, label: string): Promise<void> {
-  const executable = command[0];
+  const executable = command[0] ?? null;
   if (!executable) throw new Error(`${label} has no executable`);
   await new Promise<void>((resolve, reject) => {
     const child = childProcess.spawn(executable, command.slice(1), {
@@ -111,15 +57,15 @@ function normalise(value: string): string {
 }
 
 function commonDirectory(files: readonly string[]): string {
-  const firstFile = files[0];
+  const firstFile = files[0] ?? null;
   if (!firstFile) return root;
   const parts = files.map(file => normalise(file).split(pathHost.sep));
-  const first = parts[0];
+  const first = parts[0] ?? null;
   if (!first) return pathHost.dirname(firstFile);
   const shared: string[] = [];
   for (let index = 0; ; index++) {
-    const value = first[index];
-    if (value === undefined || !parts.every(item => item[index] === value)) break;
+    const value = first[index] ?? null;
+    if (value == null || !parts.every(item => (item[index] ?? null) === value)) break;
     shared.push(value);
   }
   return shared.join(pathHost.sep) || pathHost.dirname(firstFile);
@@ -131,9 +77,8 @@ function relativeJson(from: string, to: string): string {
 }
 
 function parseProject(project: string): ts.Program {
-  const config = ts.readConfigFile(project, ts.sys.readFile);
-  if (config.error) throw new Error(ts.flattenDiagnosticMessageText(config.error.messageText, "\n"));
-  const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, pathHost.dirname(project), {
+  const config = ts.readJsonConfigFile(project, ts.sys.readFile);
+  const parsed = ts.parseJsonSourceFileConfigFileContent(config, ts.sys, pathHost.dirname(project), {
     noEmit: true,
     incremental: false,
     composite: false,
@@ -146,7 +91,8 @@ function parseProject(project: string): ts.Program {
 
 const originalConfigPath = pathHost.resolve(root, optionValue("--config") ?? "baguette.config.json");
 const configRoot = pathHost.dirname(originalConfigPath);
-const config = await readJson<BaguetteConfig>(originalConfigPath);
+const config = parseConfig(await fs.readFile(originalConfigPath, "utf8"));
+assertCanonicalThistleSource(config);
 if (!Array.isArray(config.entries) || config.entries.length === 0) {
   throw new Error(`${originalConfigPath} must define at least one TypeScript entry module`);
 }
@@ -157,7 +103,7 @@ const outputRoot = pathHost.join(stageRoot, "src");
 const inputProject = pathHost.join(inputDir, "tsconfig.json");
 const reportFile = pathHost.join(stageRoot, "bake-report.json");
 await fs.rm(stageRoot, { recursive: true, force: true });
-await fs.mkdir(inputDir, { recursive: true });
+mkdirSync(inputDir, { recursive: true });
 
 const projectPath = pathHost.resolve(configRoot, config.project ?? "tsconfig.json");
 const inputFiles = [...new Set([...config.entries, ...(config.intrinsicModules ?? [])]
@@ -179,22 +125,14 @@ await writeJson(inputProject, {
 
 const moduleDir = pathHost.dirname(urlHost.fileURLToPath(import.meta.url));
 const bakeRoot = pathHost.resolve(moduleDir, "../vendor/bake");
-const bakeProject = pathHost.join(bakeRoot, "tsconfig.json");
-const bakeCli = pathHost.join(bakeRoot, "dist/cli.js");
-if (!await exists(bakeProject)) {
+const bakeCli = pathHost.join(bakeRoot, "src/cli.ts");
+if (!await pathExists(bakeCli)) {
   throw new Error("Baguette's Bake submodule is missing; run git submodule update --init --recursive");
-}
-if (!await exists(bakeCli)) {
-  const importMeta = import.meta as unknown as { resolve(specifier: string): string };
-  const typescriptFile = urlHost.fileURLToPath(importMeta.resolve("typescript"));
-  const tscFile = pathHost.join(pathHost.dirname(typescriptFile), "tsc.js");
-  await run([processHost.execPath, tscFile, "-p", bakeProject], bakeRoot, "Bake build");
 }
 
 await run([
   processHost.execPath,
   bakeCli,
-  "--engine", processHost.env.BAGUETTE_BAKE_ENGINE ?? "auto",
   "--project", inputProject,
   "--out-dir", outputRoot,
   "--report", reportFile,
@@ -238,17 +176,23 @@ await writeJson(finalProject, {
   exclude: [],
 });
 
-const bakedConfig: Record<string, unknown> = {
+const bakedConfig: BaguetteConfig = {
   ...config,
+  // Bake flattens source paths. Preserve the exact original entries so
+  // Baguette can validate the same canonical Thistle origin after lowering.
+  canonicalOriginalEntries: config.entries,
+  // Source modules include transitive imports, not just configured entries.
+  // Reject a separate Teto executor even when hidden behind an ABI wrapper.
+  canonicalOriginalModules: sources.map(source => source.fileName),
   project: finalProject,
   entries: config.entries.map(bakedSource),
   intrinsicModules: (config.intrinsicModules ?? []).map(bakedSource),
 };
-if (config.generatedDir !== undefined) bakedConfig.generatedDir = pathHost.resolve(configRoot, config.generatedDir);
-if (config.outDir !== undefined) bakedConfig.outDir = pathHost.resolve(configRoot, config.outDir);
-if (config.preludeFile !== undefined) bakedConfig.preludeFile = pathHost.resolve(configRoot, config.preludeFile);
-if (config.variants !== undefined) {
-  bakedConfig.variants = config.variants.map(variant => variant.preludeFile === undefined ? variant : {
+if (config.generatedDir != null) bakedConfig.generatedDir = pathHost.resolve(configRoot, config.generatedDir);
+if (config.outDir != null) bakedConfig.outDir = pathHost.resolve(configRoot, config.outDir);
+if (config.preludeFile != null) bakedConfig.preludeFile = pathHost.resolve(configRoot, config.preludeFile);
+if (config.variants != null) {
+  bakedConfig.variants = config.variants.map(variant => variant.preludeFile == null ? variant : {
     ...variant,
     preludeFile: pathHost.resolve(configRoot, variant.preludeFile),
   });

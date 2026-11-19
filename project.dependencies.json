@@ -3,10 +3,19 @@
   "dependencies": [
     {
       "name": "KITTYX",
-      "repository": "kitty-crow/kittyx",
+      "repository": "kittycrow-kittyx/kittyx",
       "path": "vendor/kittyx",
-      "commit": "6d6dbac796d59e8ea07c52cbcd3a0b7f181da163",
+      "commit": "64af2607c1d31cb661358532a170e3c09bb8ed2f",
       "relationship": "contract",
+      "direct": true,
+      "updatePolicy": "pull-request"
+    },
+    {
+      "name": "Bake",
+      "repository": "kittycrow-kittyx/bake",
+      "path": "vendor/bake",
+      "commit": "663ee268cfcf883709d560b51172addb971c2151",
+      "relationship": "build",
       "direct": true,
       "updatePolicy": "pull-request"
     }

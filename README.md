@@ -1,43 +1,42 @@
 # Baguette
 
-**BAGUETTE** means **Baguette Ahead-of-time Generates Universal Executables, Targeting Teto Efficiently**.
+**BAGUETTE**: Baguette Ahead-of-time Generates Universal Executables,
+Targeting Teto Efficiently.
 
-Baguette is an ahead-of-time compiler from TypeScript to WebAssembly. Bake is its canonical source frontend: every compilation first validates the configured programme and safely lowers compatible TypeScript into Baguette's deterministic subset. Baguette then remains the final authority for subset validation, lowering and WebAssembly generation.
-
-```text
-TypeScript
-    -> Bake validation and safe source lowering
-    -> Baguette-compatible TypeScript
-    -> Baguette AOT compilation
-    -> WebAssembly
-```
+Baguette compiles a statically supported TypeScript subset to WebAssembly.
+It uses Bake for source validation and lowering, then applies its own subset
+and ABI validation before code generation.
 
 ## Requirements
 
-- Bun 1.1 or later, or Node.js 22.6 or later with TypeScript stripping enabled;
-- TypeScript;
-- AssemblyScript and Binaryen, as pinned by `package.json`;
-- a recursive Git checkout so the pinned Bake and KITTYX submodules are present.
+- Bun 1.1 or later;
+- TypeScript, AssemblyScript and Binaryen as declared in `package.json`;
+- the pinned Bake and KITTYX dependencies.
 
 ## Use
 
-    git submodule update --init --recursive
-    npm install
-    bun src/compiler.ts --config baguette.config.json
+```sh
+git submodule update --init --recursive
+bun install
+cp baguette.config.example.json baguette.config.json
+bun src/compiler.ts --config baguette.config.json
+```
 
-Validate without writing the final WebAssembly modules:
+Edit the configuration to identify the input project, entry points, memory
+settings and exported ABI. The example is a starting point, not a complete
+configuration for arbitrary input.
 
-    bun src/compiler.ts --config baguette.config.json --validate-only
+`--validate-only` checks the input without writing final WebAssembly.
+`--skip-determinism-check` omits the repeated generation pass for local
+iteration. Bake runs directly from its pinned TypeScript source under Bun.
 
-Skip the second deterministic-build pass during local development:
+## Validation
 
-    bun src/compiler.ts --config baguette.config.json --skip-determinism-check
-
-`BAGUETTE_BAKE_ENGINE` may select Bake's `auto`, `host` or `wasm` core. `auto` is the default. Baguette builds the pinned Bake CLI locally when its generated JavaScript is absent.
-
-Copy `baguette.config.example.json` as a starting point for a target configuration.
+The three CI jobs validate the transpiler, generate modular WAT and reference WASM from a standalone fixture, and independently reconstruct and assemble the generated WAT. Consumer projects validate their own kernel builds.
 
 ## Documentation
+
+[Compiler module reference](docs/index.md). Run `bun run guards` for strict source, test and documentation checks.
 
 - [Compiler pipeline](docs/compiler.md)
 - [Configuration](docs/configuration.md)
@@ -45,4 +44,4 @@ Copy `baguette.config.example.json` as a starting point for a target configurati
 
 ## Licence
 
-MIT. See `LICENSE`.
+[MIT](LICENSE).

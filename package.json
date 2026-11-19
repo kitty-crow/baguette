@@ -1,6 +1,6 @@
 {
   "name": "@kitty-crow/baguette",
-  "version": "0.2.6",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "description": "Kernel-independent ahead-of-time TypeScript-to-WebAssembly compiler.",
@@ -8,8 +8,10 @@
     "baguette": "./src/compiler.ts"
   },
   "scripts": {
-    "check": "tsc -p tsconfig.json --noEmit && npm run bake:check",
-    "bake:check": "tsc -p vendor/bake/tsconfig.json --noEmit && tsc -p vendor/bake/tsconfig.core.json --noEmit"
+    "check": "bun --bun tsc -p tsconfig.json --noEmit",
+    "test:source-contract": "bun test src/test/source-contract.test.ts",
+    "test:wat-modules": "bun test src/test/wat-modules.test.ts",
+    "guards": "bash scripts/guards.sh"
   },
   "dependencies": {
     "assemblyscript": "0.28.19",
@@ -17,11 +19,11 @@
     "typescript": "^5.9.2"
   },
   "devDependencies": {
-    "@types/node": "^22.15.0"
+    "@types/node": "^22.15.0",
+    "@kitty-crow/code-guards": "git+https://github.com/kitty-crow/code-guards.git#d1ce06c6b4a71e5f94ca97ba4b0f6780408aa3f6"
   },
   "engines": {
-    "bun": ">=1.1.0",
-    "node": ">=22.6.0"
+    "bun": ">=1.1.0"
   },
   "author": {
     "name": "Kitty Crow",
